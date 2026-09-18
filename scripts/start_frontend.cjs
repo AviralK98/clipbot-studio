@@ -1,0 +1,10 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const frontend = path.resolve(__dirname, '../apps/frontend');
+const standalone = path.join(frontend, '.next/standalone');
+const server = path.join(standalone, 'server.js');
+if (!fs.existsSync(server)) throw new Error('Run npm run build in apps/frontend first.');
+fs.cpSync(path.join(frontend, '.next/static'), path.join(standalone, '.next/static'), {recursive:true});
+process.env.HOSTNAME = '127.0.0.1';
+process.env.PORT = process.env.PORT || '3000';
+require(server);

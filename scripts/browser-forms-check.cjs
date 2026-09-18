@@ -1,0 +1,27 @@
+const {chromium} = require(process.argv[2] || 'playwright');
+(async () => {
+  const browser = await chromium.launch({headless:true});
+  const page = await browser.newPage({viewport:{width:1366,height:900}});
+  await page.goto('http://localhost:3000/sources');
+  await page.getByLabel('Studio password').fill(process.env.CLIPBOT_TEST_PASSWORD || 'clipbot-local');
+  await page.getByRole('button',{name:'Open studio'}).click();
+  await page.getByRole('heading',{name:'Good content starts here.'}).waitFor();
+  const state = await (await page.request.get('http://localhost:3000/api/studio')).json();
+  if(!state.demo_mode) throw Error('Form checks require an isolated demo workspace');
+  const title = 'Browser verification ' + Date.now();
+  await page.getByRole('button',{name:'Add source',exact:true}).click();
+  const dialog = page.getByRole('dialog',{name:'Add a content source'});
+  await dialog.getByLabel('Source name').fill(title);
+  await dialog.getByLabel('Source URL or relative local folder').fill('http://127.0.0.1/private.mp4');
+  await dialog.getByLabel('Authorization record').fill('Development-only form verification; no external media is submitted.');
+  await dialog.getByRole('button',{name:'Save source'}).click();
+  await dialog.getByRole('alert').filter({hasText:'Private network URLs'}).waitFor();
+  await dialog.getByLabel('Source URL or relative local folder').fill('https://example.com/browser-verification.mp4');
+  await dialog.getByRole('button',{name:'Save source'}).click();
+  await dialog.waitFor({state:'hidden'});
+  await page.getByRole('heading',{name:title,exact:true}).waitFor();
+  await page.getByRole('button',{name:'Archive '+title,exact:true}).click();
+  await page.getByRole('heading',{name:title,exact:true}).waitFor({state:'hidden'});
+  await browser.close();
+  console.log('Form checks passed: in-dialog API validation, source creation and archival through the UI.');
+})().catch(error=>{console.error(error);process.exit(1)});

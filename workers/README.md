@@ -1,0 +1,1 @@
+Workers are implemented in apps/backend/clipbot/worker.py. The queue and handlers live with the domain code to avoid circular package dependencies. Local development can run python -m clipbot.local_worker without Redis. Production uses Celery/Redis and Celery Beat; both execute the same persisted SQL jobs.

@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.venv/
+.next/
+node_modules/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.db
+*.db-*
+*.egg-info/
+data/
+artifacts/
+*.tsbuildinfo

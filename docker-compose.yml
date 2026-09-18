@@ -1,0 +1,100 @@
+name: clipbot
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+  env_file:
+    - path: .env
+      required: false
+  environment: &backend-env
+    DATABASE_URL: postgresql+psycopg://clipbot:${POSTGRES_PASSWORD:-clipbot-local-db}@postgres:5432/clipbot
+    REDIS_URL: redis://redis:6379/0
+    STORAGE_ROOT: /app/data/media
+    SOURCE_DIRECTORY: /app/data/sources
+  volumes:
+    - media:/app/data/media
+    - sources:/app/data/sources
+  restart: unless-stopped
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: clipbot
+      POSTGRES_USER: clipbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clipbot-local-db}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U clipbot -d clipbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  backend:
+    <<: *backend
+    ports:
+      - 127.0.0.1:8000:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+  worker:
+    <<: *backend
+    command: celery -A clipbot.worker.app worker --loglevel=info --concurrency=2
+    depends_on:
+      backend:
+        condition: service_healthy
+  scheduler:
+    <<: *backend
+    command: celery -A clipbot.worker.app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    depends_on:
+      backend:
+        condition: service_healthy
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - 127.0.0.1:3000:3000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+  n8n:
+    image: n8nio/n8n:stable
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-local-n8n-key-change-before-deployment}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_SECURE_COOKIE: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      GENERIC_TIMEZONE: ${TIMEZONE:-Europe/London}
+    ports:
+      - 127.0.0.1:5678:5678
+    volumes:
+      - n8n:/home/node/.n8n
+    restart: unless-stopped
+volumes:
+  postgres:
+  redis:
+  media:
+  sources:
+  n8n:

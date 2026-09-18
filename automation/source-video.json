@@ -1,0 +1,58 @@
+{
+  "name": "ClipBot — authorized video ingress",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clipbot-source-video",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived"
+      },
+      "id": "authorized-video",
+      "name": "Authorized video event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/api/videos",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "enqueue-video",
+      "name": "Queue in ClipBot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        450,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Authorized video event": {
+      "main": [
+        [
+          {
+            "node": "Queue in ClipBot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
