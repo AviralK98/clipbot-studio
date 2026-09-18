@@ -1,4 +1,5 @@
 "use client";
+import { BulkActions } from "./bulk-actions";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
@@ -766,6 +767,12 @@ export default function Dashboard({ view }: { view: string }) {
           )}
           {view === "clips" && (
             <>
+              <BulkActions
+                studio={studio}
+                provider={provider}
+                query={q}
+                refresh={refresh}
+              />
               <div className="clip-toolbar">
                 <div className="search-input">
                   <Search size={16} />

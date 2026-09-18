@@ -18,3 +18,9 @@ Webhook validation uses HMAC-SHA256(secret, raw_body + salt), constant-time comp
 The timeRanges field is described as seconds but the example uses values consistent with milliseconds. OPUS_TIME_RANGE_UNIT=unknown therefore preserves no normalized ranges, leaving transcript and embedding deduplication active. Set milliseconds or seconds only after validating a real response against the source video. Do not infer units from magnitude.
 
 No provider-side idempotency contract was established. An ambiguous submission is held for reconciliation. The integration does not bypass content ownership checks or API plan requirements.
+
+## Export retrieval
+
+Clip lists may be a bare array or a `{data: [...], total: N}` envelope. When `uriForExport` is absent, ClipBot collects existing clip IDs into a named export collection and calls `POST /collections/{id}/export`. Collection ID and membership progress are checkpointed in the provider project, and memberships are checked before adding on retry. Export links are archived through the normal media pipeline. If the export endpoint returns an empty link but an authorized MP4 preview is available, ClipBot archives the unmodified preview, records media_variant=opus_preview, labels it in the review reason and requires manual approval. Branding and quality may differ from a full export. No new clipping project is submitted. Existing imported clips receive recovered URLs and blocked evaluation jobs are requeued.
+
+Reference: https://github.com/opus-pro/opus-skills/blob/main/skills/opusclip/references/api-reference.md

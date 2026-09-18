@@ -111,3 +111,85 @@ async def test_get_server_error_and_429_are_retryable():
         with pytest.raises(Transient) as exc:
             await request_json(client, "POST", "https://example.com/projects")
         assert exc.value.retry_after == 120
+
+
+@respx.mock
+async def test_opus_data_envelope():
+    provider = OpusProvider(Settings(opus_api_key="test", _env_file=None))
+    respx.get(provider.base + "/exportable-clips").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [{"id": "c1", "title": "Clip", "text": "Transcript", "durationMs": 30000}],
+                "total": 1,
+            },
+        )
+    )
+    clips = await provider.get_clips("p1")
+    assert len(clips) == 1
+    assert clips[0].external_id == "c1"
+    assert clips[0].media_url is None
+
+
+@respx.mock
+async def test_opus_collection_export_recovers_membership(monkeypatch):
+    import asyncio
+
+    from clipbot.integrations.clipping import Candidate
+
+    async def no_wait(_):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    provider = OpusProvider(Settings(opus_api_key="test", _env_file=None))
+    respx.get(provider.base + "/collections").mock(
+        return_value=httpx.Response(
+            200, json={"data": {"list": [{"collectionId": "col", "collectionName": "ClipBot export p"}]}}
+        )
+    )
+    add = respx.post(provider.base + "/collection-contents").mock(return_value=httpx.Response(200, json={}))
+    respx.post(provider.base + "/collections/col/export").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "contentList": [{"contentId": "p.c", "uriForExport": "https://example.com/export.mp4"}]
+                }
+            },
+        )
+    )
+    state = {}
+    saved = []
+    clips = await provider.export_clips(
+        [Candidate("p.c", "title", "text", 30)], state, lambda s: saved.append(dict(s)), "p"
+    )
+    assert clips[0].media_url == "https://example.com/export.mp4"
+    assert not add.called
+    assert state["added"] == ["p.c"]
+    assert saved
+
+
+@respx.mock
+async def test_opus_preview_fallback_is_explicit(monkeypatch):
+    import asyncio
+
+    from clipbot.integrations.clipping import Candidate
+
+    async def no_wait(_):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    provider = OpusProvider(Settings(opus_api_key="test", _env_file=None))
+    respx.post(provider.base + "/collections/col/export").mock(
+        return_value=httpx.Response(
+            200, json={"data": {"contentList": [{"contentId": "p.c", "uriForExport": ""}]}}
+        )
+    )
+    clips = await provider.export_clips(
+        [Candidate("p.c", "title", "text", 30, preview_url="https://example.com/preview.mp4")],
+        {"collection_id": "col", "added": ["p.c"]},
+        lambda s: None,
+        "p",
+    )
+    assert clips[0].media_variant == "opus_preview"
+    assert clips[0].media_url == "https://example.com/preview.mp4"

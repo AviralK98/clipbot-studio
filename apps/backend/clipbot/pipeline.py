@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from .ai import classify, llm_provider, validated_metadata
+from .ai import classify, clean_transcript, llm_provider, prefer_provider_title, validated_metadata
 from .analytics import CHECKPOINTS, learn, normalize, preferences, route
 from .budgets import reserve
 from .config import get_settings
@@ -23,6 +23,7 @@ from .models import (
     SocialAccount,
     Source,
     SourceVideo,
+    SystemJob,
     SystemState,
     now,
 )
@@ -179,6 +180,15 @@ async def poll(job):
             else "Clipping engine is processing",
         )
     candidates = await provider.get_clips(project.external_id)
+    if project.provider == "opus" and not video.demo:
+        export_state = dict(project.detail.get("export", {}))
+
+        def save_export(state):
+            with transaction() as db:
+                row = db.get(ProviderProject, project.id)
+                row.detail = {**row.detail, "export": dict(state)}
+
+        candidates = await provider.export_clips(candidates, export_state, save_export, project.external_id)
     with transaction() as db:
         for candidate in candidates:
             exists = db.scalar(
@@ -187,6 +197,15 @@ async def poll(job):
                 )
             )
             if exists:
+                if candidate.media_url and not exists.storage_key:
+                    exists.media_url = candidate.media_url
+                    exists.metadata_json = {**exists.metadata_json, "media_variant": candidate.media_variant}
+                    evaluation = db.scalar(
+                        select(SystemJob).where(SystemJob.idempotency_key == f"evaluate:{exists.id}")
+                    )
+                    if evaluation and evaluation.status in {"blocked", "dead_letter", "retry"}:
+                        evaluation.status, evaluation.error, evaluation.due_at = "queued", None, now()
+                        evaluation.attempts = 0
                 continue
             if candidate.duration <= 0:
                 continue
@@ -200,6 +219,7 @@ async def poll(job):
                 transcript=candidate.transcript,
                 duration=candidate.duration,
                 media_url=candidate.media_url,
+                metadata_json={"media_variant": candidate.media_variant},
                 provider_score=candidate.provider_score,
                 ranges=ranges,
                 start_time=min(r[0] for r in ranges) if ranges else None,
@@ -254,7 +274,10 @@ async def evaluate(job):
                 demo=clip.demo,
             )
             usage_id = usage.id
-        result, tokens = await provider.evaluate(clip.transcript)
+        # Strip provider placeholder tokens once, so scoring, copy and hook
+        # evidence checks all work on the same spoken text.
+        transcript = clean_transcript(clip.transcript)
+        result, tokens = await provider.evaluate(transcript)
         with transaction() as db:
             row = db.get(Clip, clip.id)
             state = db.get(SystemState, 1)
@@ -262,7 +285,11 @@ async def evaluate(job):
                 result, state.thresholds, state.policy_filters
             )
             row.reason, row.topic = result.reason, result.topic[:150]
-            row.metadata_json = validated_metadata(result, clip.transcript)
+            row.metadata_json = {**row.metadata_json, **validated_metadata(result, transcript)}
+            if row.metadata_json.get("media_variant") == "opus_preview":
+                row.reason += " Media is the original Opus preview MP4; branding and quality may differ from a full export. Review before publishing."
+                row.tier = "reserve"
+                row.metadata_json = {**row.metadata_json, "manual_review_required": True}
             if local_review:
                 row.tier = "reserve"
                 row.metadata_json = {
@@ -270,6 +297,7 @@ async def evaluate(job):
                     "review_mode": "local",
                     "manual_review_required": True,
                 }
+                row.metadata_json = prefer_provider_title(row.metadata_json, row.title or "")
             row.hook_style = row.metadata_json["hooks"][0]["style"] if row.metadata_json["hooks"] else "story"
             db.add(
                 ClipScore(
@@ -300,7 +328,7 @@ async def evaluate(job):
                 cost=0 if clip.demo or local_review else cfg.ai_call_reservation_usd,
                 demo=clip.demo,
             )
-        vector, model = await provider.embed(clip.transcript)
+        vector, model = await provider.embed(clean_transcript(clip.transcript))
         with transaction() as db:
             db.add(ClipEmbedding(clip_id=clip.id, vector=vector, model=model))
 

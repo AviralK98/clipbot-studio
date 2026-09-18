@@ -32,3 +32,7 @@ The implemented adapter uses Facebook Login and a Page access token. Link a prof
 Local folders are relative to SOURCE_DIRECTORY. FFprobe verifies file duration; Docker includes it. Complete files are copied to persistent media storage. The public media origin must make the generated sources/{hash}.mp4 and clips/{uuid}.mp4 keys reachable by the provider. Do not expose the entire backend or filesystem to implement this.
 
 Environment changes require restarting backend and worker. Runtime posting times, thresholds and kill switches are persisted and edited in Settings. Existing database settings take precedence over initial AUTOPILOT defaults; STOP_ALL_POSTING=true in the environment is an additional hard stop.
+
+## Bulk clip actions
+
+Clips has Approve all and Upload all now. Both use all pages matching the current search and engine, independent of the status tab. Approval skips flagged, incomplete, rejected and duplicate clips. Upload requires an approved clip and a selected destination and records one durable job per clip/account. It bypasses scheduled slots and minimum spacing only, preserves daily account/platform/global caps and the posting stop, and reports skipped clips with reasons. Existing queued/published/cancelled records are not recreated. Confirmation shows the batch count and YouTube privacy. These buttons do not run until explicitly confirmed.

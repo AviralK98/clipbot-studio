@@ -271,6 +271,33 @@ def classify(evaluation: Evaluation, thresholds: dict, filters: list):
     return score, tier, flags
 
 
+# Clipping engines put placeholder tokens in transcripts for gaps they could not
+# transcribe (OpusClip emits __silence and __missing). They are not spoken words, so
+# they must never reach a title, caption, description or dedup fingerprint.
+PROVIDER_MARKER = re.compile(r"__\w+")
+
+
+def clean_transcript(text: str) -> str:
+    """Remove provider placeholder tokens and collapse the whitespace they leave behind."""
+    return " ".join(PROVIDER_MARKER.sub(" ", text or "").split())
+
+
+def prefer_provider_title(metadata: dict, title: str) -> dict:
+    """Use the engine's own clip title for every platform.
+
+    Local review extracts titles from transcript text, which reads like a raw caption.
+    The clipping engine already supplies a written title, so prefer it when present.
+    """
+    if not title:
+        return metadata
+    updated = dict(metadata)
+    for platform in ("youtube", "tiktok", "instagram"):
+        copy = updated.get(platform)
+        if isinstance(copy, dict):
+            updated[platform] = {**copy, "title": title[:100]}
+    return updated
+
+
 def validated_metadata(evaluation, transcript):
     data = evaluation.model_dump()
     data["hooks"] = [h for h in data["hooks"] if h["evidence_quote"] and h["evidence_quote"] in transcript]

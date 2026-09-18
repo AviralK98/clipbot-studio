@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -37,7 +38,7 @@ from .models import (
 )
 from .monitoring import Discovery, youtube_id
 from .pipeline import ingest
-from .scheduling import schedule_clip
+from .scheduling import can_publish, schedule_clip
 from .schemas import (
     AccountInput,
     Login,
@@ -322,6 +323,124 @@ def clips(
             item["source"] = db.get(Source, video.source_id).name
             values.append(item)
         return {"items": values, "total": count, "offset": offset, "limit": limit}
+
+
+class BulkClipsInput(BaseModel):
+    clip_ids: list[str] = Field(min_length=1, max_length=500)
+    account_id: str | None = None
+
+
+@app.get("/api/clips/bulk-preview", dependencies=[Depends(require_auth)])
+def bulk_preview(provider: str = "all", q: str = ""):
+    with Session() as db:
+        rows = list(db.scalars(select(Clip).where(Clip.demo == cfg.demo_mode)))
+        rows = [
+            c
+            for c in rows
+            if (provider == "all" or c.provider == provider)
+            and (not q or q.lower() in c.title.lower() or q.lower() in c.topic.lower())
+            and not c.duplicate_of
+            and c.overall_score is not None
+            and db.get(SourceVideo, c.source_video_id).status == "complete"
+        ]
+        return {
+            "approve": [c.id for c in rows if c.status == "reserve" and not c.policy_flags],
+            "upload": [c.id for c in rows if c.status == "approved"],
+            "privacy": cfg.youtube_privacy,
+        }
+
+
+@app.post("/api/clips/bulk-approve", dependencies=[Depends(require_auth)])
+def bulk_approve(payload: BulkClipsInput):
+    changed, skipped = [], []
+    with transaction() as db:
+        for cid in dict.fromkeys(payload.clip_ids):
+            c = db.get(Clip, cid)
+            if (
+                not c
+                or c.demo != cfg.demo_mode
+                or c.status != "reserve"
+                or c.duplicate_of
+                or c.policy_flags
+                or c.overall_score is None
+                or not c.metadata_json
+                or db.get(SourceVideo, c.source_video_id).status != "complete"
+            ):
+                skipped.append({"id": cid, "reason": "Not eligible; flagged clips need individual review"})
+                continue
+            c.status, c.manually_approved = "approved", True
+            changed.append(cid)
+    return {"changed": changed, "skipped": skipped}
+
+
+@app.post("/api/clips/bulk-upload", dependencies=[Depends(require_auth)])
+def bulk_upload(payload: BulkClipsInput):
+    from datetime import UTC
+    from zoneinfo import ZoneInfo
+
+    changed, skipped = [], []
+    with transaction() as db:
+        account = get_or_404(db, SocialAccount, payload.account_id)
+        state = db.get(SystemState, 1)
+        if state.stop_all_posting or cfg.stop_all_posting:
+            raise Blocked("All posting is stopped; resume posting in Queue first")
+        zone = ZoneInfo(state.timezone)
+        today = now().replace(tzinfo=UTC).astimezone(zone).date()
+        posts = list(
+            db.scalars(
+                select(ScheduledPost).where(
+                    ScheduledPost.status != "cancelled", ScheduledPost.demo == cfg.demo_mode
+                )
+            )
+        )
+        todays = [p for p in posts if p.scheduled_at.replace(tzinfo=UTC).astimezone(zone).date() == today]
+        capacity = min(
+            account.daily_limit - sum(p.account_id == account.id for p in todays),
+            state.daily_limit - sum(p.platform == account.platform for p in todays),
+            cfg.max_clips_per_day - len(todays),
+        )
+        for cid in dict.fromkeys(payload.clip_ids):
+            c = db.get(Clip, cid)
+            if not c or c.status != "approved":
+                skipped.append({"id": cid, "reason": "Approve this clip first"})
+                continue
+            existing = db.scalar(
+                select(ScheduledPost).where(
+                    ScheduledPost.clip_id == cid, ScheduledPost.account_id == account.id
+                )
+            )
+            if existing:
+                skipped.append({"id": cid, "reason": "Already queued, published or cancelled; use Queue"})
+                continue
+            try:
+                can_publish(db, c, account, state)
+            except Blocked as error:
+                skipped.append({"id": cid, "reason": str(error)})
+                continue
+            if capacity <= 0:
+                skipped.append({"id": cid, "reason": "Daily posting limit reached"})
+                continue
+            # Explicit upload-now action bypasses time slots and spacing, not daily caps.
+            post = ScheduledPost(
+                clip_id=cid,
+                account_id=account.id,
+                platform=account.platform,
+                scheduled_at=now(),
+                demo=c.demo,
+                status="scheduled",
+            )
+            db.add(post)
+            db.flush()
+            c.status = "scheduled"
+            enqueue(
+                db,
+                "publish",
+                {"post_id": post.id, "clip_id": cid, "platform": account.platform},
+                f"publish:{post.id}",
+            )
+            changed.append(cid)
+            capacity -= 1
+    return {"changed": changed, "skipped": skipped}
 
 
 @app.get("/api/clips/{clip_id}", dependencies=[Depends(require_auth)])

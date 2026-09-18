@@ -15,6 +15,41 @@ class Publication:
     url: str | None
 
 
+# YouTube refuses further uploads once the channel's own daily allowance is used up
+# (reason "uploadLimitExceeded"). Retrying sooner cannot succeed, so those jobs wait
+# instead of being marked failed and burning the whole batch in one pass.
+DEFERRABLE_UPLOAD_REASONS = frozenset(
+    {"uploadLimitExceeded", "rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"}
+)
+UPLOAD_ALLOWANCE_RETRY_SECONDS = 6 * 3600
+
+
+def google_error(response: httpx.Response) -> tuple[str, str]:
+    """Return the (reason, message) Google reported, or empty strings when absent."""
+    try:
+        error = response.json().get("error")
+    except ValueError:
+        return "", ""
+    if not isinstance(error, dict):
+        return "", ""
+    details = error.get("errors") or [{}]
+    first = details[0] if isinstance(details[0], dict) else {}
+    return str(first.get("reason") or ""), str(error.get("message") or "")[:200]
+
+
+def upload_rejection(action: str, response: httpx.Response) -> Blocked | Deferred:
+    """Defer when the upload allowance is exhausted; otherwise report Google's reason."""
+    reason, message = google_error(response)
+    if reason in DEFERRABLE_UPLOAD_REASONS:
+        return Deferred(
+            UPLOAD_ALLOWANCE_RETRY_SECONDS,
+            f"YouTube upload allowance exhausted ({reason}); waiting before retrying. {message}",
+        )
+    detail = f" {reason}" if reason else ""
+    detail += f": {message}" if message else ""
+    return Blocked(f"YouTube {action} (HTTP {response.status_code}){detail}")
+
+
 class PublishingProvider(ABC):
     @abstractmethod
     async def publish(self, clip, post, persist) -> Publication: ...
@@ -91,7 +126,7 @@ class YouTubeProvider(PublishingProvider):
                 if response.status_code >= 400:
                     state["init_attempted"] = False
                     persist(state)
-                    raise Blocked(f"YouTube rejected upload initiation (HTTP {response.status_code})")
+                    raise upload_rejection("rejected upload initiation", response)
                 location = response.headers.get("location", "")
                 host = urlparse(location).hostname or ""
                 if urlparse(location).scheme != "https" or not (
@@ -141,7 +176,7 @@ class YouTubeProvider(PublishingProvider):
                 raise Deferred(1, "Uploading next YouTube chunk")
             if response.status_code >= 500 or response.status_code == 429:
                 raise Transient("YouTube resumable upload paused")
-            raise Blocked(f"YouTube upload failed (HTTP {response.status_code})")
+            raise upload_rejection("upload failed", response)
 
     async def metrics(self, publication):
         async with httpx.AsyncClient(timeout=30) as client:

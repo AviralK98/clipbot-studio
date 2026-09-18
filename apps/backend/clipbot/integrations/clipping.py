@@ -1,3 +1,4 @@
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -18,6 +19,8 @@ class Candidate:
     media_url: str | None = None
     provider_score: float | None = None
     ranges: list = field(default_factory=list)
+    preview_url: str | None = None
+    media_variant: str = "export"
 
 
 class ClippingProvider(ABC):
@@ -149,6 +152,56 @@ class OpusProvider(ClippingProvider):
         # Never infer full completion from a partial exportable-clips response.
         return "awaiting_webhook"
 
+    async def export_clips(self, candidates, state, save, project_id):
+        """Export existing renders through a durable collection; never re-submit video."""
+        missing = [c for c in candidates if not c.media_url]
+        if not missing:
+            return candidates
+        name = "ClipBot export " + project_id
+        if not state.get("collection_id"):
+            existing = await self._request("GET", "/collections", params={"q": "mine"})
+            matches = [c for c in existing.get("data", {}).get("list", []) if c.get("collectionName") == name]
+            if matches:
+                state["collection_id"] = matches[0]["collectionId"]
+            else:
+                await asyncio.sleep(2.2)
+                created = await self._request("POST", "/collections", json={"collectionName": name})
+                state["collection_id"] = created["data"]["collectionId"]
+            save(state)
+        collection = state["collection_id"]
+        added = set(state.get("added", []))
+        for clip in missing:
+            if clip.external_id in added:
+                continue
+            await asyncio.sleep(2.2)
+            # Membership lookup makes a retry after a lost response safe.
+            memberships = await self._request(
+                "GET", "/collections", params={"q": "findByContentId", "contentId": clip.external_id}
+            )
+            if not any(c["collectionId"] == collection for c in memberships.get("data", {}).get("list", [])):
+                await asyncio.sleep(2.2)
+                await self._request(
+                    "POST",
+                    "/collection-contents",
+                    json={"collectionId": collection, "contentId": clip.external_id},
+                )
+            added.add(clip.external_id)
+            state["added"] = sorted(added)
+            save(state)
+        await asyncio.sleep(2.2)
+        exported = await self._request("POST", f"/collections/{collection}/export", json={})
+        urls = {
+            c["contentId"]: c.get("uriForExport") for c in exported.get("data", {}).get("contentList", [])
+        }
+        for clip in missing:
+            clip.media_url = urls.get(clip.external_id)
+            if not clip.media_url and clip.preview_url:
+                clip.media_url = clip.preview_url
+                clip.media_variant = "opus_preview"
+        if any(not c.media_url for c in candidates):
+            raise Transient("Opus export is not ready; retrying the existing collection", 60)
+        return candidates
+
     async def get_clips(self, project_id):
         result = []
         for page in range(1, 101):
@@ -157,8 +210,11 @@ class OpusProvider(ClippingProvider):
                 "/exportable-clips",
                 params={"q": "findByProjectId", "projectId": project_id, "pageNum": page, "pageSize": 100},
             )
+            total = data.get("total") if isinstance(data, dict) else None
+            if isinstance(data, dict):
+                data = data.get("data")
             if not isinstance(data, list):
-                raise Blocked("Unexpected Opus clips response; expected the documented array")
+                raise Blocked("Unexpected Opus clips response; expected an array or data array")
             for c in data:
                 ranges = []
                 if self.cfg.opus_time_range_unit in {"seconds", "milliseconds"}:
@@ -171,10 +227,11 @@ class OpusProvider(ClippingProvider):
                         transcript=c.get("text", ""),
                         duration=c["durationMs"] / 1000,
                         media_url=c.get("uriForExport"),
+                        preview_url=c.get("uriForPreview"),
                         ranges=ranges,
                     )
                 )
-            if len(data) < 100:
+            if len(data) < 100 or (isinstance(total, int) and len(result) >= total):
                 return result
         raise Blocked("Opus pagination exceeded limit; investigate before importing")
 
