@@ -14,6 +14,7 @@ from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 from .analytics import analytics_report, normalize
+from .clip_watch import current_analysis, request_analysis
 from .config import get_settings
 from .db import Session, initialize, transaction
 from .errors import Blocked
@@ -53,6 +54,13 @@ from .schemas import (
 )
 from .security import require_auth, signer, verify_password
 from .storage import LocalStorage
+from .video_insights import (
+    compare_videos,
+    published_videos,
+    top_videos,
+    video_analysis,
+    video_context,
+)
 
 cfg = get_settings()
 log = logging.getLogger("clipbot.api")
@@ -293,6 +301,50 @@ def studio():
                 },
             ],
         }
+
+
+@app.get("/api/insights/videos", dependencies=[Depends(require_auth)])
+def insight_videos():
+    with Session() as db:
+        return {"videos": published_videos(db)}
+
+
+@app.get("/api/insights/top", dependencies=[Depends(require_auth)])
+async def insight_top(period: str = Query("week", pattern="^(day|week|month|year)$"), refresh: bool = False):
+    with Session() as db:
+        published = published_videos(db)
+    return await top_videos(published, period, refresh)
+
+
+@app.get("/api/insights/compare", dependencies=[Depends(require_auth)])
+async def insight_compare(refresh: bool = False):
+    with Session() as db:
+        published = published_videos(db)
+    return await compare_videos(published, refresh)
+
+
+@app.get("/api/insights/videos/{video_id}", dependencies=[Depends(require_auth)])
+async def insight_video(video_id: str, refresh: bool = False):
+    with Session() as db:
+        context = video_context(db, video_id)
+    if context is None:
+        raise HTTPException(404, "ClipBot did not publish this YouTube video")
+    return await video_analysis(context, refresh)
+
+
+@app.get("/api/insights/videos/{video_id}/watch", dependencies=[Depends(require_auth)])
+def insight_watch(video_id: str):
+    with Session() as db:
+        return current_analysis(db, video_id)
+
+
+@app.post("/api/insights/videos/{video_id}/watch", dependencies=[Depends(require_auth)])
+def insight_watch_start(video_id: str):
+    with transaction() as db:
+        state = request_analysis(db, video_id)
+    if state is None:
+        raise HTTPException(404, "ClipBot did not publish this YouTube video")
+    return state
 
 
 @app.get("/api/clips", dependencies=[Depends(require_auth)])

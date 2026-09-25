@@ -134,6 +134,132 @@ export type Studio = {
     note: string;
   };
 };
+export type InsightVideo = {
+  video_id: string;
+  title: string;
+  published_at: string;
+  clip_id: string;
+  engine: string;
+  duration: number;
+  views: number | null;
+  url: string;
+  thumbnail: string;
+};
+export type VideoStats = {
+  views: number;
+  engaged_views: number | null;
+  stayed_rate: number | null;
+  average_view_percentage: number | null;
+  average_view_duration: number | null;
+  likes: number | null;
+  comments?: number | null;
+  shares: number | null;
+  subscribers_gained: number | null;
+};
+export type TopVideos = {
+  period: string;
+  start: string;
+  end: string;
+  note: string;
+  videos: (VideoStats & {
+    video_id: string;
+    title: string;
+    published_at: string | null;
+    thumbnail: string;
+    url: string;
+    published_by_clipbot: boolean;
+  })[];
+};
+export type VideoAnalysis = {
+  video: {
+    video_id: string;
+    title: string;
+    url: string;
+    thumbnail: string;
+    published_at: string;
+    engine: string;
+    duration: number;
+    opening: string;
+    removed: boolean;
+  };
+  range: { start: string; end: string };
+  live: {
+    viewCount: number | null;
+    likeCount: number | null;
+    commentCount: number | null;
+  };
+  summary: VideoStats;
+  typical_views: number | null;
+  traffic: {
+    source: string;
+    label: string;
+    views: number;
+    share: number | null;
+  }[];
+  daily: { date: string; views: number; engaged_views: number | null }[];
+  countries: { country: string; views: number }[];
+  retention: {
+    position: number;
+    second: number;
+    watching: number;
+    relative: number | null;
+  }[];
+  observations: string[];
+  note: string;
+  fetched_at: string;
+};
+export type CompareVideo = {
+  video_id: string;
+  title: string;
+  thumbnail: string;
+  url: string;
+  published_at: string;
+  engine: string;
+  duration: number;
+  views: number;
+  feed_views: number;
+  search_views: number;
+  other_views: number;
+  stayed_rate: number | null;
+  average_view_percentage: number | null;
+  posted_day: string;
+  posted_same_day: number;
+  upload_number: number;
+  feed_tested: boolean;
+};
+export type Comparison = {
+  start: string;
+  end: string;
+  videos: CompareVideo[];
+  findings: string[];
+  note: string;
+};
+export type WatchResult = {
+  summary: string;
+  hook: {
+    first_seconds: string;
+    rating: "strong" | "mixed" | "weak";
+    why: string;
+  };
+  moments: {
+    time: string;
+    kind: "hook" | "payoff" | "drop_off" | "rewatch" | "slow" | "other";
+    happening: string;
+    effect: string;
+  }[];
+  worked: string[];
+  hurt: string[];
+  next_time: string[];
+  luck_vs_content: string;
+};
+export type WatchState = {
+  status: "none" | "queued" | "running" | "done" | "failed" | "stalled";
+  configured: boolean;
+  model?: string | null;
+  result?: WatchResult | null;
+  error?: string | null;
+  updated_at?: string;
+};
 export async function api<T>(
   path: string,
   body?: unknown,

@@ -10,6 +10,23 @@ from .config import get_settings
 from .errors import Blocked
 from .security import public_url
 
+# MP4/MOV files are a series of boxes; the first box's type sits at bytes 4-8.
+VIDEO_BOX_TYPES = {b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide", b"pnot"}
+
+
+def is_video_file(path) -> bool:
+    """True if the file starts like an MP4/MOV.
+
+    Catches files that were damaged on disk: on 2026-09-22 two clips were overwritten with a
+    repeating junk block and uploaded anyway, and YouTube abandoned processing both.
+    """
+    try:
+        with open(path, "rb") as stream:
+            head = stream.read(8)
+    except OSError:
+        return False
+    return len(head) == 8 and head[4:8] in VIDEO_BOX_TYPES
+
 
 class StorageProvider(ABC):
     @abstractmethod
@@ -58,6 +75,8 @@ class LocalStorage(StorageProvider):
                                 stream.write(chunk)
                         if size == 0:
                             raise Blocked("Downloaded clip is empty")
+                        if not is_video_file(part):
+                            raise Blocked("Downloaded clip is not a valid MP4 video file")
                         os.replace(part, target)
                     finally:
                         part.unlink(missing_ok=True)

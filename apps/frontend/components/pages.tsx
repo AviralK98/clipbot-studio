@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { api, date, number, Post, Source, Studio } from "@/lib/types";
 import { Badge, Empty, ReachChart, Toggle } from "./ui";
+import { VideoInsights } from "./video-insights";
 export type Perform = (
   action: () => Promise<unknown>,
   message: string,
@@ -567,6 +568,7 @@ export function InsightsPage({ studio }: { studio: Studio }) {
           Publish <ArrowRight size={13} /> Learn
         </div>
       </div>
+      <VideoInsights />
       {studio.insights.length ? (
         <div className="insight-grid">
           {studio.insights.map((i) => (

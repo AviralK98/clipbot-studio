@@ -83,9 +83,14 @@ class YouTubeProvider(PublishingProvider):
         return result["access_token"]
 
     async def publish(self, clip, post, persist):
-        from ..storage import LocalStorage
+        from ..storage import LocalStorage, is_video_file
 
         file = LocalStorage().path(clip.storage_key)
+        if not is_video_file(file):
+            raise Blocked(
+                "This clip's video file is damaged (it is not a valid MP4), so ClipBot won't upload it. "
+                "Re-download the clip, then retry."
+            )
         size = file.stat().st_size
         state = dict(post.remote_state)
         async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
@@ -313,14 +318,6 @@ class InstagramProvider(PublishingProvider):
         )
 
 
-class TikTokProvider(PublishingProvider):
-    async def publish(self, clip, post, persist):
-        raise Blocked("TikTok Direct Post excludes private account utilities; use the clip export handoff")
-
-    async def metrics(self, publication):
-        raise Blocked("Attach a TikTok analytics export; no unsupported analytics access is attempted")
-
-
 class DemoPublishingProvider(PublishingProvider):
     async def publish(self, clip, post, persist):
         return Publication(f"demo-{post.id}", None)
@@ -338,6 +335,144 @@ class DemoPublishingProvider(PublishingProvider):
             "average_watch_percentage": 72,
             "followers_gained": sample // 450,
         }
+
+
+def opus_error(response: httpx.Response) -> tuple[str, str]:
+    """Return the (errorName, errorMessage) OpusClip reported, or empty strings when absent."""
+    try:
+        data = response.json()
+    except ValueError:
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    return str(data.get("errorName") or ""), str(data.get("errorMessage") or "")[:200]
+
+
+# Reasons OpusClip has been observed to reject a /post-tasks call with 400 for, that mean
+# "nothing was created, try again later" rather than a real problem with the request. Each
+# gets its own retry delay - these are different kinds of "later":
+#   _ExportNotReadyError (2026-09-21): clip still being prepared for the destination platform;
+#       its own message says "try again in a couple of minutes", so retry soon.
+#   QuotaExceed (2026-09-22): "Post limit reached for TikTok (15 per 24 hours)." - OpusClip's
+#       own per-platform posting quota, separate from ClipBot's daily caps and from TikTok's
+#       own account-level limits. Retrying every 6h allows up to 4 attempts within the 24h
+#       window without needing a human.
+OPUS_DEFERRAL_RETRY_SECONDS: dict[str, int] = {
+    "_ExportNotReadyError": 120,
+    "QuotaExceed": 6 * 3600,
+}
+
+
+class TikTokProvider(PublishingProvider):
+    """Posts via OpusClip's /post-tasks endpoint.
+
+    TikTok's Direct Post API refuses unaudited apps that only post to their own
+    owner's accounts (see docs/SOCIAL_APIS.md). OpusClip is a TikTok-approved
+    posting partner, so ClipBot hands it the already-clipped video and caption
+    instead of talking to TikTok directly. This only works for clips OpusClip
+    itself produced (it must already hold the source video); Vizard clips still
+    require manual export.
+    """
+
+    base = "https://api.opus.pro/api"
+
+    def __init__(self):
+        self.cfg = get_settings()
+        if not self.cfg.opus_api_key:
+            raise Blocked("Populate OPUS_API_KEY in .env and restart backend/worker")
+
+    def _headers(self):
+        headers = {"Authorization": f"Bearer {self.cfg.opus_api_key}"}
+        if self.cfg.opus_org_id:
+            headers["x-opus-org-id"] = self.cfg.opus_org_id
+        return headers
+
+    async def publish(self, clip, post, persist):
+        if clip.provider != "opus":
+            raise Blocked(
+                "TikTok publishing is mediated through OpusClip and only works for clips OpusClip "
+                "generated (it must already hold the source video). Export this clip for manual posting."
+            )
+        if not post.account_external_id:
+            raise Blocked(
+                "This TikTok destination has no OpusClip postAccountId; set external_id on the "
+                "social account to the ID returned by GET /api/social-accounts on OpusClip."
+            )
+        project_id, dot, clip_id = clip.external_id.partition(".")
+        if not dot or not project_id or not clip_id:
+            raise Blocked(
+                f"Unexpected Opus clip id {clip.external_id!r}; expected the composite "
+                "'{projectId}.{clipId}' form returned by exportable-clips"
+            )
+        state = dict(post.remote_state)
+        if state.get("publish_attempted"):
+            raise Ambiguous("TikTok publication needs reconciliation; check OpusClip before retrying")
+        copy = clip.metadata_json["tiktok"]
+        state["publish_attempted"] = True
+        persist(state)
+        body = {
+            "projectId": project_id,
+            "clipId": clip_id,
+            "postAccountId": post.account_external_id,
+            "postDetail": {
+                "title": copy["title"][:100],
+                "mediaType": "video",
+                "custom": {
+                    # No "privacy" field: OpusClip's docs describe it as a YouTube-specific
+                    # public/private/unlisted enum, not TikTok's own privacy levels (SELF_ONLY,
+                    # FOLLOWER_OF_CREATOR, MUTUAL_FOLLOW_FRIENDS, PUBLIC_TO_EVERYONE). Sending it
+                    # for a TikTok destination is undocumented, so the account's own default
+                    # posting privacy (set in TikTok Studio) applies instead.
+                    "description": (copy["caption"] + chr(10) + " ".join(copy["hashtags"]))[:2200],
+                },
+            },
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                response = await client.post(f"{self.base}/post-tasks", headers=self._headers(), json=body)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                state["publish_attempted"] = False
+                persist(state)
+                raise Transient("Could not connect to OpusClip") from exc
+            except httpx.TransportError as exc:
+                raise Ambiguous("OpusClip response lost; check its dashboard and reconcile") from exc
+        if response.status_code == 400:
+            reason, message = opus_error(response)
+            if reason in OPUS_DEFERRAL_RETRY_SECONDS:
+                state["publish_attempted"] = False
+                persist(state)
+                raise Deferred(
+                    OPUS_DEFERRAL_RETRY_SECONDS[reason],
+                    f"OpusClip could not post to TikTok yet ({reason}); retrying automatically. {message}",
+                )
+        if response.status_code == 429:
+            state["publish_attempted"] = False
+            persist(state)
+            retry = response.headers.get("retry-after", "60")
+            raise Transient("OpusClip rate limit", int(retry) if retry.isdigit() else 60)
+        if response.status_code >= 500:
+            raise Ambiguous("OpusClip returned a server error after submission; reconcile")
+        if response.status_code >= 400:
+            name, message = opus_error(response)
+            detail = f" {name}" if name else ""
+            detail += f": {message}" if message else ""
+            raise Blocked(f"OpusClip rejected the TikTok post (HTTP {response.status_code}){detail}")
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise Ambiguous(
+                "OpusClip accepted the TikTok post but returned an invalid response; reconcile"
+            ) from exc
+        post_id = data.get("data", {}).get("postId") if isinstance(data, dict) else None
+        if not post_id:
+            raise Ambiguous("OpusClip accepted the TikTok post without a postId; reconcile")
+        return Publication(post_id, None)
+
+    async def metrics(self, publication):
+        # OpusClip's own dashboard marks Analytics as "Coming soon" (checked 2026-09-21); there is
+        # no documented per-post metrics endpoint yet. Blocked (not Deferred) so this does not
+        # retry forever waiting for data that does not exist.
+        raise Blocked("OpusClip does not yet expose analytics for TikTok posts; unsupported for now")
 
 
 def publishing_provider(platform, demo=False):
