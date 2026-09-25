@@ -57,9 +57,10 @@ def can_publish(db, clip, account, state):
         raise Blocked("Platform metadata is missing")
     if not clip.demo and not clip.storage_key:
         raise Blocked("Clip media has not been archived")
-    if account.platform == "tiktok" and not clip.demo:
+    if account.platform == "tiktok" and not clip.demo and clip.provider != "opus":
         raise Blocked(
-            "TikTok Direct Post excludes private account-management utilities. Export this clip for manual posting."
+            "TikTok publishing is mediated through OpusClip and only works for clips OpusClip "
+            "generated (it must already hold the source video). Export this clip for manual posting."
         )
 
 

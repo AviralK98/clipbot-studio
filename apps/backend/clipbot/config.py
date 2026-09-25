@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
+    # Gemini watches published Shorts for the AI insights "why did it do well" analysis.
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_fallback_model: str = "gemini-3.7-flash"
     youtube_client_id: str = ""
     youtube_client_secret: str = ""
     youtube_refresh_token: str = ""

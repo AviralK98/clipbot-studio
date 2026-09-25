@@ -28,6 +28,8 @@ from clipbot.models import (
 from clipbot.storage import LocalStorage
 from sqlalchemy import func, select
 
+TINY_MP4 = b"\x00\x00\x00\x08ftyp"  # the smallest valid MP4 start: an empty ftyp box
+
 
 def records(source):
     with transaction() as db:
@@ -211,7 +213,7 @@ async def test_youtube_recovers_lost_final_response_without_second_upload(monkey
         monkeypatch.setattr(get_settings(), name, "contract-test-value")
     file = LocalStorage().path("clips/upload-test.mp4")
     file.parent.mkdir(parents=True, exist_ok=True)
-    file.write_bytes(b"12345678")
+    file.write_bytes(TINY_MP4)
     clip = SimpleNamespace(
         storage_key="clips/upload-test.mp4",
         metadata_json={"youtube": {"title": "Owned clip", "description": "A description", "hashtags": []}},
@@ -242,7 +244,7 @@ async def test_youtube_recovers_lost_final_response_without_second_upload(monkey
     result = await provider.publish(clip, post, persist)
     assert result.external_id == "confirmed-id" and init.call_count == 1
     assert upload.calls[0].request.headers["Content-Range"] == "bytes */8"
-    assert upload.calls[1].request.content == b"12345678"
+    assert upload.calls[1].request.content == TINY_MP4
     assert upload.calls[2].request.headers["Content-Range"] == "bytes */8"
 
 
@@ -252,7 +254,7 @@ async def test_youtube_rejects_untrusted_session_location(monkeypatch):
         monkeypatch.setattr(get_settings(), name, "contract-test-value")
     file = LocalStorage().path("clips/location-test.mp4")
     file.parent.mkdir(parents=True, exist_ok=True)
-    file.write_bytes(b"1234")
+    file.write_bytes(TINY_MP4)
     clip = SimpleNamespace(
         storage_key="clips/location-test.mp4",
         metadata_json={"youtube": {"title": "Owned clip", "description": "Description", "hashtags": []}},

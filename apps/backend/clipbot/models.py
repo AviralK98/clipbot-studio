@@ -159,6 +159,19 @@ class AnalyticsSnapshot(Entity, Base):
     provenance: Mapped[str] = mapped_column(String(40), default="platform_api")
 
 
+class ClipAnalysis(Entity, Base):
+    """Gemini's watch-through analysis of one published YouTube Short, saved so it runs once."""
+
+    __tablename__ = "clip_analyses"
+    video_id: Mapped[str] = mapped_column(String(64), unique=True)
+    clip_id: Mapped[str] = mapped_column(ForeignKey("clips.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    model: Mapped[str] = mapped_column(String(80), default="")
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class StrategyMetric(Entity, Base):
     __tablename__ = "strategy_metrics"
     __table_args__ = (UniqueConstraint("dimension", "label"),)

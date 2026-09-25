@@ -282,11 +282,17 @@ def clean_transcript(text: str) -> str:
     return " ".join(PROVIDER_MARKER.sub(" ", text or "").split())
 
 
-def prefer_provider_title(metadata: dict, title: str) -> dict:
-    """Use the engine's own clip title for every platform.
+def prefer_provider_copy(metadata: dict, title: str) -> dict:
+    """Use the engine's own clip title for every platform's title AND caption.
 
-    Local review extracts titles from transcript text, which reads like a raw caption.
-    The clipping engine already supplies a written title, so prefer it when present.
+    Local review extracts both from transcript text, which reads like raw dialogue
+    (confirmed 2026-09-21: a TikTok post went out with "Was my career kind of on a
+    trajectory and then it took a different turn Okay Yeah..." as its visible caption).
+    YouTube shows `title` most prominently; TikTok and Instagram show `caption` as the
+    primary visible text. The clipping engine already supplies a written title, so prefer
+    it for both fields rather than a transcript excerpt. `description` is left as-is
+    (cleaned of provider markers, but still transcript-derived) as secondary/supplementary
+    text where platforms show it.
     """
     if not title:
         return metadata
@@ -294,8 +300,9 @@ def prefer_provider_title(metadata: dict, title: str) -> dict:
     for platform in ("youtube", "tiktok", "instagram"):
         copy = updated.get(platform)
         if isinstance(copy, dict):
-            updated[platform] = {**copy, "title": title[:100]}
+            updated[platform] = {**copy, "title": title[:100], "caption": title[:2200]}
     return updated
+
 
 
 def validated_metadata(evaluation, transcript):

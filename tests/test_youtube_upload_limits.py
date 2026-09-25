@@ -10,6 +10,8 @@ from clipbot.errors import Blocked, Deferred
 from clipbot.integrations.social import YouTubeProvider
 from clipbot.storage import LocalStorage
 
+TINY_MP4 = b"\x00\x00\x00\x08ftyp"  # the smallest valid MP4 start: an empty ftyp box
+
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 
 
@@ -24,7 +26,7 @@ def credentials(monkeypatch):
 def clip_on_disk(name):
     file = LocalStorage().path(f"clips/{name}.mp4")
     file.parent.mkdir(parents=True, exist_ok=True)
-    file.write_bytes(b"12345678")
+    file.write_bytes(TINY_MP4)
     return SimpleNamespace(
         storage_key=f"clips/{name}.mp4",
         metadata_json={"youtube": {"title": "Owned clip", "description": "Description", "hashtags": []}},
@@ -88,3 +90,20 @@ async def test_rejection_without_json_body_still_reports_status(monkeypatch):
 
     with pytest.raises(Blocked, match="HTTP 400"):
         await YouTubeProvider().publish(clip_on_disk("nojson"), post, lambda state: None)
+
+
+@respx.mock
+async def test_damaged_video_file_is_never_uploaded(monkeypatch):
+    credentials(monkeypatch)
+    init = respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200))
+    clip = clip_on_disk("damaged")
+    # The repeating junk block that overwrote two clips on 2026-09-22.
+    LocalStorage().path(clip.storage_key).write_bytes(
+        bytes([0x24, 0x1A, 0x9C, 0x92, 0x6D, 0x85, 0xCE, 0x6D]) * 64
+    )
+    post = SimpleNamespace(remote_state={})
+
+    with pytest.raises(Blocked, match="damaged"):
+        await YouTubeProvider().publish(clip, post, lambda state: None)
+    assert init.call_count == 0
+    assert post.remote_state == {}

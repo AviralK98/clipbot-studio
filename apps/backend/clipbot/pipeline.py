@@ -2,9 +2,10 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from .ai import classify, clean_transcript, llm_provider, prefer_provider_title, validated_metadata
+from .ai import classify, clean_transcript, llm_provider, prefer_provider_copy, validated_metadata
 from .analytics import CHECKPOINTS, learn, normalize, preferences, route
 from .budgets import reserve
+from .clip_watch import watch
 from .config import get_settings
 from .db import Session, transaction
 from .dedup import duplicate_reason
@@ -297,7 +298,7 @@ async def evaluate(job):
                     "review_mode": "local",
                     "manual_review_required": True,
                 }
-                row.metadata_json = prefer_provider_title(row.metadata_json, row.title or "")
+                row.metadata_json = prefer_provider_copy(row.metadata_json, row.title or "")
             row.hook_style = row.metadata_json["hooks"][0]["style"] if row.metadata_json["hooks"] else "story"
             db.add(
                 ClipScore(
@@ -426,6 +427,10 @@ async def publish(job):
             db.get(SystemState, 1),
         )
         can_publish(db, clip, account, state)
+        # Not a mapped column: a plain read-only convenience attribute so
+        # per-account provider IDs (e.g. OpusClip's postAccountId for TikTok)
+        # reach PublishingProvider.publish without changing its signature.
+        post.account_external_id = account.external_id
         post.status, clip.status = "publishing", "publishing"
 
     def persist(remote):
@@ -560,4 +565,5 @@ HANDLERS = {
     "publish": publish,
     "metrics": metrics,
     "strategy": strategy,
+    "watch": watch,
 }
