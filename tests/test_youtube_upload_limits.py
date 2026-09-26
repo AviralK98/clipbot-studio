@@ -93,6 +93,35 @@ async def test_rejection_without_json_body_still_reports_status(monkeypatch):
 
 
 @respx.mock
+async def test_expired_login_waits_instead_of_failing(monkeypatch):
+    for name in ["youtube_client_id", "youtube_client_secret", "youtube_refresh_token"]:
+        monkeypatch.setattr(get_settings(), name, "contract-test-value")
+    respx.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(
+            400, json={"error": "invalid_grant", "error_description": "Token has been expired or revoked."}
+        )
+    )
+    init = respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200))
+    post = SimpleNamespace(remote_state={})
+
+    with pytest.raises(Deferred, match="renew-youtube-login.bat") as caught:
+        await YouTubeProvider().publish(clip_on_disk("expired"), post, lambda state: None)
+    assert caught.value.seconds == 3600
+    assert init.call_count == 0 and post.remote_state == {}  # nothing started, so a retry is safe
+
+
+@respx.mock
+async def test_bad_client_credentials_still_block(monkeypatch):
+    for name in ["youtube_client_id", "youtube_client_secret", "youtube_refresh_token"]:
+        monkeypatch.setattr(get_settings(), name, "contract-test-value")
+    respx.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(401, json={"error": "invalid_client"})
+    )
+    with pytest.raises(Blocked, match="invalid_client"):
+        await YouTubeProvider().metrics(SimpleNamespace(external_id="x"))
+
+
+@respx.mock
 async def test_damaged_video_file_is_never_uploaded(monkeypatch):
     credentials(monkeypatch)
     init = respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200))

@@ -24,7 +24,6 @@ from .models import (
     SocialAccount,
     Source,
     SourceVideo,
-    SystemJob,
     SystemState,
     now,
 )
@@ -169,27 +168,15 @@ async def poll(job):
         video = db.get(SourceVideo, project.source_video_id)
     if project.status == "complete":
         return
-    if now() - project.created_at > timedelta(hours=12):
-        raise Blocked("Provider completion exceeded 12 hours; verify project before retrying")
-    provider = clipping_provider(project.provider, video.demo)
-    status = await provider.get_status(project.external_id)
-    if status != "complete" and not project.detail.get("completion_confirmed"):
-        raise Deferred(
-            60,
-            "Awaiting signed Opus completion callback"
-            if project.provider == "opus"
-            else "Clipping engine is processing",
-        )
-    candidates = await provider.get_clips(project.external_id)
-    if project.provider == "opus" and not video.demo:
-        export_state = dict(project.detail.get("export", {}))
-
-        def save_export(state):
-            with transaction() as db:
-                row = db.get(ProviderProject, project.id)
-                row.detail = {**row.detail, "export": dict(state)}
-
-        candidates = await provider.export_clips(candidates, export_state, save_export, project.external_id)
+    try:
+        candidates = await engine_clips(project, video)
+    except Blocked as exc:
+        # This engine is out for this video; let the other engine's clips finish without it.
+        with transaction() as db:
+            row = db.get(ProviderProject, project.id)
+            row.status, row.error = "failed", str(exc)
+            finish_video(db, video.id)
+        raise
     with transaction() as db:
         for candidate in candidates:
             exists = db.scalar(
@@ -198,15 +185,12 @@ async def poll(job):
                 )
             )
             if exists:
-                if candidate.media_url and not exists.storage_key:
+                if candidate.media_url and not exists.storage_key and not exists.demo:
                     exists.media_url = candidate.media_url
                     exists.metadata_json = {**exists.metadata_json, "media_variant": candidate.media_variant}
-                    evaluation = db.scalar(
-                        select(SystemJob).where(SystemJob.idempotency_key == f"evaluate:{exists.id}")
-                    )
-                    if evaluation and evaluation.status in {"blocked", "dead_letter", "retry"}:
-                        evaluation.status, evaluation.error, evaluation.due_at = "queued", None, now()
-                        evaluation.attempts = 0
+                    saving = queue_download(db, exists)
+                    if saving.status in {"blocked", "dead_letter", "retry"}:
+                        saving.status, saving.error, saving.due_at, saving.attempts = "queued", None, now(), 0
                 continue
             if candidate.duration <= 0:
                 continue
@@ -230,8 +214,70 @@ async def poll(job):
             db.add(clip)
             db.flush()
             enqueue(db, "evaluate", {"clip_id": clip.id, "source_video_id": video.id}, f"evaluate:{clip.id}")
-        db.get(ProviderProject, project.id).status = "complete"
-        enqueue(db, "finalize", {"source_video_id": video.id}, f"finalize:{video.id}")
+            if not clip.demo:
+                queue_download(db, clip)
+        row = db.get(ProviderProject, project.id)
+        row.status, row.error = "complete", None
+        finish_video(db, video.id)
+
+
+async def engine_clips(project, video):
+    """Wait for one engine's project to finish, then return its clips (exported, for OpusClip)."""
+    if now() - project.created_at > timedelta(hours=12):
+        raise Blocked("Provider completion exceeded 12 hours; verify project before retrying")
+    provider = clipping_provider(project.provider, video.demo)
+    status = await provider.get_status(project.external_id)
+    if status != "complete" and not project.detail.get("completion_confirmed"):
+        raise Deferred(
+            60,
+            "Awaiting signed Opus completion callback"
+            if project.provider == "opus"
+            else "Clipping engine is processing",
+        )
+    candidates = await provider.get_clips(project.external_id)
+    if project.provider == "opus" and not video.demo:
+        export_state = dict(project.detail.get("export", {}))
+
+        def save_export(state):
+            with transaction() as db:
+                row = db.get(ProviderProject, project.id)
+                row.detail = {**row.detail, "export": dict(state)}
+
+        candidates = await provider.export_clips(candidates, export_state, save_export, project.external_id)
+    return candidates
+
+
+def queue_download(db, clip):
+    """Save the clip's video file after scoring: jobs run oldest-due first, so scores come back
+    in seconds while the large files (often ~50 MB each) follow in the background."""
+    return enqueue(
+        db,
+        "download",
+        {"clip_id": clip.id, "source_video_id": clip.source_video_id},
+        f"download:{clip.id}",
+        due_at=now() + timedelta(seconds=5),
+    )
+
+
+async def download(job):
+    """YouTube uploads need the file itself, and engine download links expire after seven days."""
+    with Session() as db:
+        clip = db.get(Clip, job.payload["clip_id"])
+    if clip.demo or clip.storage_key:
+        return
+    if not clip.media_url:
+        raise Blocked("The clipping engine hasn't supplied this clip's video file yet")
+    key = await LocalStorage().archive(clip.media_url, f"clips/{clip.id}.mp4")
+    with transaction() as db:
+        db.get(Clip, clip.id).storage_key = key
+
+
+def finish_video(db, video_id):
+    """Queue final selection; reopen it if it already ran without this engine (e.g. a retried poll)."""
+    job = enqueue(db, "finalize", {"source_video_id": video_id}, f"finalize:{video_id}")
+    if job.status == "done":
+        job.status, job.due_at, job.attempts, job.error = "queued", now(), 0, None
+        db.get(SourceVideo, video_id).status = "processing"
 
 
 async def evaluate(job):
@@ -251,12 +297,6 @@ async def evaluate(job):
         return
     provider = llm_provider(clip.demo)
     local_review = not clip.demo and cfg.llm_provider == "local"
-    if not clip.demo and not clip.storage_key:
-        if not clip.media_url:
-            raise Blocked("Provider has not supplied downloadable media")
-        key = await LocalStorage().archive(clip.media_url, f"clips/{clip.id}.mp4")
-        with transaction() as db:
-            db.get(Clip, clip.id).storage_key = key
     if not previous:
         with transaction() as db:
             db.get(Clip, clip.id).status = "analyzing"
@@ -369,6 +409,11 @@ async def finalize(job):
         state = db.get(SystemState, 1)
         for clip in clips:
             if clip.status in {"scheduled", "published", "rejected", "failed"}:
+                continue
+            if clip.status in {"approved", "reserve"}:
+                # Already decided (by an earlier selection or by hand); keep it and compare against it.
+                if clip.status == "approved" or clip.metadata_json.get("review_mode") == "local":
+                    winners.append(clip)
                 continue
             duplicate = next(
                 (
@@ -560,6 +605,7 @@ HANDLERS = {
     "submit": submit,
     "poll": poll,
     "evaluate": evaluate,
+    "download": download,
     "finalize": finalize,
     "monitor": monitor,
     "publish": publish,

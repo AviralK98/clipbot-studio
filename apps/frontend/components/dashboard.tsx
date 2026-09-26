@@ -52,6 +52,14 @@ import {
 import { Badge, ClipCard, Empty, Modal, ReachChart, Stat, Toggle } from "./ui";
 import { PlatformCopy } from "./platform-copy";
 import { StudioDialogs } from "./dialogs";
+import { VideoProgress } from "./video-progress";
+import {
+  canPick,
+  defaultQueueAccount,
+  PickBox,
+  QueueBar,
+  queuedFor,
+} from "./clip-queue";
 import {
   AnalyticsPage,
   ConnectionsPage,
@@ -136,6 +144,9 @@ export default function Dashboard({ view }: { view: string }) {
   const [dialog, setDialog] = useState<Dialog>(null),
     [selected, setSelected] = useState<Clip | null>(null),
     [flags, setFlags] = useState(false);
+  // Clips picked in the library, in pick order, and the channel they'll be queued to.
+  const [picked, setPicked] = useState<Clip[]>([]),
+    [queueAccount, setQueueAccount] = useState("");
   const closeDialog = useCallback(() => setDialog(null), []),
     closeClip = useCallback(() => setSelected(null), []);
   const refresh = useCallback(async () => {
@@ -314,6 +325,23 @@ export default function Dashboard({ view }: { view: string }) {
     (studio.counts.scheduled || 0) +
     (studio.counts.published || 0);
   const totalSpend = studio.usage.reduce((n, v) => n + v.cost, 0);
+  const pickAccount = queueAccount || defaultQueueAccount(studio);
+  const queued = queuedFor(posts, pickAccount);
+  const togglePick = (clip: Clip) => {
+    const entry = queued.get(clip.id);
+    if (entry) {
+      void perform(
+        () => api("/queue/" + entry.post.id + "/cancel?compact=true", {}),
+        `Took “${clip.title}” out of the queue; the clips after it moved up.`,
+      );
+      return;
+    }
+    setPicked(
+      picked.some((c) => c.id === clip.id)
+        ? picked.filter((c) => c.id !== clip.id)
+        : [...picked, clip],
+    );
+  };
   return (
     <div className="app-shell">
       <aside className={"sidebar " + (mobile ? "open" : "")}>
@@ -499,6 +527,20 @@ export default function Dashboard({ view }: { view: string }) {
               </button>
             </div>
           )}
+          <VideoProgress
+            videos={studio.recent_videos}
+            showFinished={view === "overview" || view === "clips"}
+            onConfirm={(projectId, externalId) =>
+              perform(
+                () =>
+                  api("/projects/" + projectId + "/reconcile", {
+                    external_id: externalId,
+                    completion_confirmed: true,
+                  }),
+                "Importing the clips. The card shows when they’re ready to review.",
+              )
+            }
+          />
           {view === "overview" && (
             <>
               <div className="stats-grid">
@@ -773,6 +815,18 @@ export default function Dashboard({ view }: { view: string }) {
                 query={q}
                 refresh={refresh}
               />
+              <QueueBar
+                studio={studio}
+                queued={queued}
+                picked={picked}
+                setPicked={setPicked}
+                account={pickAccount}
+                setAccount={(id) => {
+                  setQueueAccount(id);
+                  setPicked([]);
+                }}
+                refresh={refresh}
+              />
               <div className="clip-toolbar">
                 <div className="search-input">
                   <Search size={16} />
@@ -833,13 +887,35 @@ export default function Dashboard({ view }: { view: string }) {
               </div>
               {clips.length ? (
                 <div className={grid ? "clip-grid" : "clip-grid list-mode"}>
-                  {clips.map((c) => (
-                    <ClipCard
-                      key={c.id}
-                      clip={c}
-                      onClick={() => void inspectClip(c)}
-                    />
-                  ))}
+                  {clips.map((c) => {
+                    const entry = queued.get(c.id);
+                    const at = picked.findIndex((p) => p.id === c.id);
+                    const n = entry
+                      ? entry.n
+                      : at >= 0
+                        ? queued.size + at + 1
+                        : 0;
+                    return (
+                      <div
+                        key={c.id}
+                        className={"clip-pick" + (n ? " on" : "")}
+                      >
+                        <ClipCard clip={c} onClick={() => void inspectClip(c)} />
+                        {(entry || canPick(c, studio.demo_mode)) && (
+                          <PickBox
+                            n={n}
+                            title={c.title}
+                            queuedAt={
+                              entry
+                                ? date(entry.post.scheduled_at, settings.timezone)
+                                : null
+                            }
+                            onToggle={() => togglePick(c)}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <Empty

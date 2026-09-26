@@ -186,7 +186,12 @@ function ComparePanel({
                 <thead>
                   <tr>
                     <th>Video</th>
-                    <th className="num">Views</th>
+                    <th
+                      className="num"
+                      title="Live count, as in YouTube Studio"
+                    >
+                      Views
+                    </th>
                     <th className="num">From Shorts feed</th>
                     <th className="num">From search</th>
                     <th className="num">Stayed</th>
@@ -222,8 +227,20 @@ function ComparePanel({
                       <td className="num">
                         <b>{number(v.views)}</b>
                       </td>
-                      <td className="num">{number(v.feed_views)}</td>
-                      <td className="num">{number(v.search_views)}</td>
+                      {v.sources_pending ? (
+                        <td
+                          className="num vi-pending"
+                          colSpan={2}
+                          title="YouTube reports where views came from 1–2 days late"
+                        >
+                          sources pending
+                        </td>
+                      ) : (
+                        <>
+                          <td className="num">{number(v.feed_views)}</td>
+                          <td className="num">{number(v.search_views)}</td>
+                        </>
+                      )}
                       <td className="num">{pct(v.stayed_rate)}</td>
                       <td className="num">
                         {v.average_view_percentage == null
@@ -355,7 +372,17 @@ function TopVideosPanel({
                   <span className="vi-top-title">
                     <b>{v.title}</b>
                     {v.published_at && (
-                      <small>Posted {date(v.published_at)}</small>
+                      <small>
+                        Posted {date(v.published_at)}
+                        {v.live_count && (
+                          <span
+                            className="vi-new"
+                            title="Live view count: YouTube's detailed numbers arrive in 1–2 days"
+                          >
+                            New
+                          </span>
+                        )}
+                      </small>
                     )}
                   </span>
                   <span className="vi-top-metric">

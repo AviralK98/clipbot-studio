@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from .ai import clean_transcript
 from .config import get_settings
-from .errors import Blocked
+from .errors import Blocked, Deferred
 from .integrations.social import YouTubeProvider, google_error
 from .models import AnalyticsSnapshot, Clip, PublishedPost, now
 
@@ -137,11 +137,10 @@ def video_context(db, video_id):
 async def _token(client):
     try:
         return await YouTubeProvider().token(client)
+    except Deferred as exc:  # expired login: jobs wait for it, but a page needs an answer now
+        raise Blocked(str(exc).replace(" Retrying hourly.", "")) from exc
     except Blocked as exc:
-        raise Blocked(
-            f"Could not sign in to YouTube ({exc}). If the login expired, generate a new "
-            "YOUTUBE_REFRESH_TOKEN and restart the backend."
-        ) from exc
+        raise Blocked(f"Could not sign in to YouTube ({exc})") from exc
 
 
 async def _report(client, token, **params):
@@ -208,8 +207,18 @@ def _window(days):
     return today - timedelta(days=days - 1), today
 
 
+def _live_views(details, video_id):
+    count = details.get(video_id, {}).get("statistics", {}).get("viewCount")
+    return int(count) if count is not None else None
+
+
 async def top_videos(published, period, refresh=False, limit=10):
-    """Most-viewed videos in a rolling window. `published` is published_videos(db)."""
+    """Most-viewed videos in a rolling window. `published` is published_videos(db).
+
+    YouTube Analytics runs 1-2 days behind, so a video uploaded inside the window is ranked by its
+    live view count instead: its whole life falls inside the window, so that count is exact and
+    current. Older videos keep their Analytics count for the window.
+    """
     _require_live()
     key = ("top", period, limit)
     cached = _recall(key, refresh)
@@ -217,23 +226,33 @@ async def top_videos(published, period, refresh=False, limit=10):
         return cached
     start, end = _window(PERIOD_DAYS[period])
     known = {v["video_id"]: v for v in published}
+    recent = {v["video_id"] for v in published if date.fromisoformat(v["published_at"][:10]) >= start}
     async with httpx.AsyncClient(timeout=30) as client:
         token = await _token(client)
-        rows = await _report(
-            client,
-            token,
-            startDate=start.isoformat(),
-            endDate=end.isoformat(),
-            dimensions="video",
-            metrics=TOP_METRICS,
-            sort="-views",
-            maxResults=limit,
-        )
-        rows = [row for row in rows if row.get("views")]
-        details = await _video_details(client, token, [row["video"] for row in rows]) if rows else {}
+        rows = {
+            row["video"]: row
+            for row in await _report(
+                client,
+                token,
+                startDate=start.isoformat(),
+                endDate=end.isoformat(),
+                dimensions="video",
+                metrics=TOP_METRICS,
+                sort="-views",
+                maxResults=limit,
+            )
+        }
+        ids = list(dict.fromkeys([*rows, *sorted(recent)]))
+        details = await _video_details(client, token, ids) if ids else {}
     videos = []
-    for row in rows:
-        video_id = row["video"]
+    for video_id in ids:
+        stats = _stats(rows.get(video_id, {}))
+        live = _live_views(details, video_id)
+        live_count = video_id in recent and live is not None and live > stats["views"]
+        if live_count:
+            stats["views"] = live
+        if not stats["views"]:
+            continue
         ours = known.get(video_id, {})
         snippet = details.get(video_id, {}).get("snippet", {})
         videos.append(
@@ -244,9 +263,11 @@ async def top_videos(published, period, refresh=False, limit=10):
                 "thumbnail": _thumbnail(video_id),
                 "url": ours.get("url") or f"https://www.youtube.com/shorts/{video_id}",
                 "published_by_clipbot": video_id in known,
-                **_stats(row),
+                "live_count": live_count,
+                **stats,
             }
         )
+    videos = sorted(videos, key=lambda v: -v["views"])[:limit]
     return _remember(
         key,
         {
@@ -482,6 +503,8 @@ async def compare_videos(published, refresh=False):
             return video_id, {row["insightTrafficSourceType"]: row["views"] for row in rows}
 
         traffic = dict(await asyncio.gather(*(sources(v) for v, row in totals.items() if row.get("views"))))
+        # Live counts match YouTube Studio; Analytics (and its traffic sources) lag 1-2 days.
+        details = await _video_details(client, token, [v["video_id"] for v in published]) if published else {}
     zone = ZoneInfo(get_settings().timezone)
 
     def posted_day(video):
@@ -493,7 +516,9 @@ async def compare_videos(published, refresh=False):
     for video in published:
         row = totals.get(video["video_id"], {})
         by_source = traffic.get(video["video_id"], {})
-        views = row.get("views") or 0
+        analytics_views = row.get("views") or 0
+        live = _live_views(details, video["video_id"])
+        views = live if live is not None else analytics_views
         feed, search = by_source.get("SHORTS", 0), by_source.get("YT_SEARCH", 0)
         videos.append(
             {
@@ -505,11 +530,14 @@ async def compare_videos(published, refresh=False):
                 "engine": video["engine"],
                 "duration": video["duration"],
                 "views": views,
+                "analytics_views": analytics_views,
+                # New views YouTube hasn't broken down by source yet (its reports lag 1-2 days).
+                "sources_pending": views - analytics_views >= max(20, 0.2 * views),
                 "feed_views": feed,
                 "search_views": search,
                 "other_views": max(0, sum(by_source.values()) - feed - search),
-                "stayed_rate": _stats(row)["stayed_rate"] if views else None,
-                "average_view_percentage": row.get("averageViewPercentage") if views else None,
+                "stayed_rate": _stats(row)["stayed_rate"] if analytics_views else None,
+                "average_view_percentage": row.get("averageViewPercentage") if analytics_views else None,
                 "posted_day": posted_day(video).isoformat(),
                 "posted_same_day": per_day[posted_day(video)],
                 "upload_number": order[video["video_id"]],
@@ -535,19 +563,32 @@ def comparison_findings(videos):
     if not total:
         return ["YouTube hasn't reported views for your videos yet; its analytics run 1-2 days behind."]
     notes = []
-    tested = [v for v in videos if v["feed_tested"]]
-    others = [v for v in videos if not v["feed_tested"] and v["views"]]
-    if not tested:
+    pending = [v for v in videos if v.get("sources_pending")]
+    if pending:
+        names = ", ".join(f"“{v['title']}” ({v['views']:,})" for v in pending[:3])
+        # Hundreds of views within a day or two can't come from search on a channel whose
+        # typical video gets a handful; a few dozen could, so only claim the feed for big jumps.
+        big = [v for v in pending if v["views"] - v.get("analytics_views", 0) >= 200]
         notes.append(
-            f"None of your {len(videos)} videos has been shown in the Shorts feed yet, so all "
-            f"{total:,} views came from search and other pages."
+            f"New views are coming in: {names}. YouTube hasn't reported where they came from yet "
+            "(1-2 days)"
+            + (", but that pace on this channel most likely means the Shorts feed." if big else ".")
         )
+    tested = [v for v in videos if v["feed_tested"]]
+    others = [v for v in videos if not v["feed_tested"] and not v.get("sources_pending") and v["views"]]
+    so_far = " so far" if pending else ""
+    if not tested:
+        if not pending:
+            notes.append(
+                f"None of your {len(videos)} videos has been shown in the Shorts feed yet, so all "
+                f"{total:,} views came from search and other pages."
+            )
     else:
         share = sum(v["views"] for v in tested) / total
         which = f"“{tested[0]['title']}”" if len(tested) == 1 else f"{len(tested)} of them"
         notes.append(
-            f"Only {len(tested)} of your {len(videos)} videos {'was' if len(tested) == 1 else 'were'} "
-            f"shown in the Shorts feed ({which}), and that brought in {share:.0%} of all your views. "
+            f"Only {len(tested)} of your {len(videos)} videos {'is' if len(tested) == 1 else 'are'} confirmed "
+            f"as shown in the Shorts feed{so_far} ({which}), and that brought in {share:.0%} of all your views. "
             "That is the main difference: YouTube showed it to people who don't follow you and didn't do "
             "the same for the rest."
         )

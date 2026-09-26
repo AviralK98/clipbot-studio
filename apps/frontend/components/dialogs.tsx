@@ -319,7 +319,7 @@ export function StudioDialogs({
                     title: f.get("title"),
                     duration: Number(f.get("duration")) * 60,
                   }),
-                "Video added to the processing queue",
+                "Video added. Follow its progress in “Your videos” at the top of the page.",
               );
             }}
           >

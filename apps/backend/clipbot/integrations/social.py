@@ -69,18 +69,37 @@ class YouTubeProvider(PublishingProvider):
             )
 
     async def token(self, client):
-        result = await request_json(
-            client,
-            "POST",
-            "https://oauth2.googleapis.com/token",
-            data={
-                "client_id": self.cfg.youtube_client_id,
-                "client_secret": self.cfg.youtube_client_secret,
-                "refresh_token": self.cfg.youtube_refresh_token,
-                "grant_type": "refresh_token",
-            },
+        try:
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": self.cfg.youtube_client_id,
+                    "client_secret": self.cfg.youtube_client_secret,
+                    "refresh_token": self.cfg.youtube_refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+        except httpx.TransportError as exc:
+            raise Transient("Could not reach Google to sign in to YouTube") from exc
+        if response.status_code == 200:
+            return response.json()["access_token"]
+        try:
+            reason = str(response.json().get("error") or "")
+        except ValueError:
+            reason = ""
+        if reason == "invalid_grant":
+            # The saved login expired (7 days while the OAuth app is in Testing) or was revoked.
+            # Wait rather than fail, so uploads and view checks resume once it is renewed.
+            raise Deferred(
+                3600,
+                "YouTube login expired or was revoked: double-click renew-youtube-login.bat, then restart "
+                "ClipBot. Retrying hourly.",
+            )
+        detail = f": {reason}" if reason else ""
+        raise Blocked(
+            f"Google refused the YouTube sign-in (HTTP {response.status_code}{detail}); "
+            "check YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET"
         )
-        return result["access_token"]
 
     async def publish(self, clip, post, persist):
         from ..storage import LocalStorage, is_video_file

@@ -36,6 +36,20 @@ class ClippingProvider(ABC):
     async def get_clips(self, project_id: str) -> list[Candidate]: ...
 
 
+# https://docs.vizard.ai/docs/response
+VIZARD_CODES = {
+    4001: "Vizard rejected the API key; replace VIZARD_API_KEY in .env and restart",
+    4002: "Vizard could not create the project",
+    4004: "Vizard does not support this video's format",
+    4005: "Vizard says the video file is broken",
+    4006: "Vizard rejected a request setting",
+    4007: "Vizard is out of processing minutes; top up your Vizard plan or wait for it to renew",
+    4008: "Vizard could not download the video from its link",
+    4009: "Vizard says the video link is invalid",
+    4010: "Vizard could not detect the spoken language",
+}
+
+
 class VizardProvider(ClippingProvider):
     base = "https://elb-api.vizard.ai/hvizard-server-front/open-api/v1"
 
@@ -57,7 +71,8 @@ class VizardProvider(ClippingProvider):
         if code == 4003:
             raise Transient("Vizard rate limit", 180)
         if code not in {2000, 1000}:
-            raise Blocked(f"Vizard rejected request with code {code}; see docs/VIZARD.md")
+            reason = VIZARD_CODES.get(code, "Vizard rejected the request; see docs/VIZARD.md")
+            raise Blocked(f"{reason} (Vizard code {code})")
         return data
 
     async def submit_video(self, url, title, duration, callback="", preferences=None):

@@ -39,7 +39,7 @@ from .models import (
 )
 from .monitoring import Discovery, youtube_id
 from .pipeline import ingest
-from .scheduling import can_publish, schedule_clip
+from .scheduling import can_publish, compact_queue, free_slot, queue_end, schedule_clip
 from .schemas import (
     AccountInput,
     Login,
@@ -61,6 +61,7 @@ from .video_insights import (
     video_analysis,
     video_context,
 )
+from .video_progress import video_progress
 
 cfg = get_settings()
 log = logging.getLogger("clipbot.api")
@@ -226,6 +227,7 @@ def studio():
                 dump(j)
                 for j in db.scalars(select(SystemJob).order_by(SystemJob.created_at.desc()).limit(100))
             ],
+            "recent_videos": video_progress(db, demo=cfg.demo_mode),
             "projects": [
                 dump(p)
                 for p in db.scalars(
@@ -425,32 +427,37 @@ def bulk_approve(payload: BulkClipsInput):
     return {"changed": changed, "skipped": skipped}
 
 
-@app.post("/api/clips/bulk-upload", dependencies=[Depends(require_auth)])
-def bulk_upload(payload: BulkClipsInput):
+def todays_capacity(db, account, state):
+    """How many more posts the account may make today (its own, the platform's and the global caps)."""
     from datetime import UTC
     from zoneinfo import ZoneInfo
 
+    zone = ZoneInfo(state.timezone)
+    today = now().replace(tzinfo=UTC).astimezone(zone).date()
+    posts = list(
+        db.scalars(
+            select(ScheduledPost).where(
+                ScheduledPost.status != "cancelled", ScheduledPost.demo == cfg.demo_mode
+            )
+        )
+    )
+    todays = [p for p in posts if p.scheduled_at.replace(tzinfo=UTC).astimezone(zone).date() == today]
+    return min(
+        account.daily_limit - sum(p.account_id == account.id for p in todays),
+        state.daily_limit - sum(p.platform == account.platform for p in todays),
+        cfg.max_clips_per_day - len(todays),
+    )
+
+
+@app.post("/api/clips/bulk-upload", dependencies=[Depends(require_auth)])
+def bulk_upload(payload: BulkClipsInput):
     changed, skipped = [], []
     with transaction() as db:
         account = get_or_404(db, SocialAccount, payload.account_id)
         state = db.get(SystemState, 1)
         if state.stop_all_posting or cfg.stop_all_posting:
             raise Blocked("All posting is stopped; resume posting in Queue first")
-        zone = ZoneInfo(state.timezone)
-        today = now().replace(tzinfo=UTC).astimezone(zone).date()
-        posts = list(
-            db.scalars(
-                select(ScheduledPost).where(
-                    ScheduledPost.status != "cancelled", ScheduledPost.demo == cfg.demo_mode
-                )
-            )
-        )
-        todays = [p for p in posts if p.scheduled_at.replace(tzinfo=UTC).astimezone(zone).date() == today]
-        capacity = min(
-            account.daily_limit - sum(p.account_id == account.id for p in todays),
-            state.daily_limit - sum(p.platform == account.platform for p in todays),
-            cfg.max_clips_per_day - len(todays),
-        )
+        capacity = todays_capacity(db, account, state)
         for cid in dict.fromkeys(payload.clip_ids):
             c = db.get(Clip, cid)
             if not c or c.status != "approved":
@@ -637,20 +644,125 @@ def schedule(payload: ScheduleInput):
         return dump(post, ("remote_state",))
 
 
+class QueueBatchInput(BaseModel):
+    clip_ids: list[str] = Field(min_length=1, max_length=100)
+    account_id: str
+    # Upload straight away (one after another, in pick order) instead of at the next posting times.
+    now: bool = False
+
+
+def post_now(db, clip, account, state):
+    """Explicit upload-now: skips posting times and spacing, not the daily caps (checked by the caller)."""
+    can_publish(db, clip, account, state)
+    post = db.scalar(
+        select(ScheduledPost).where(ScheduledPost.clip_id == clip.id, ScheduledPost.account_id == account.id)
+    )
+    if post:  # a cancelled post from an earlier unpick
+        post.scheduled_at, post.status, post.error = now(), "scheduled", None
+    else:
+        post = ScheduledPost(
+            clip_id=clip.id,
+            account_id=account.id,
+            platform=account.platform,
+            scheduled_at=now(),
+            demo=clip.demo,
+        )
+        db.add(post)
+    db.flush()
+    clip.status = "scheduled"
+    job = enqueue(
+        db,
+        "publish",
+        {"post_id": post.id, "clip_id": clip.id, "platform": account.platform},
+        f"publish:{post.id}",
+    )
+    job.status, job.due_at, job.attempts, job.error = "queued", post.scheduled_at, 0, None
+    return post
+
+
+def approve_for_queue(db, clip):
+    """Picking a clip that's waiting for review is the owner's approval; flagged clips still need a closer look."""
+    if clip.status != "reserve":
+        return
+    if clip.demo != cfg.demo_mode:
+        raise Blocked("Clip does not match the active demo/live environment")
+    if clip.duplicate_of:
+        raise Blocked("Duplicate clips can't be posted")
+    if clip.policy_flags:
+        raise Blocked("This clip has content flags; open it and approve it on its own first")
+    if clip.overall_score is None or not clip.metadata_json:
+        raise Blocked("This clip is still being scored")
+    if db.get(SourceVideo, clip.source_video_id).status != "complete":
+        raise Blocked("Its video is still being processed")
+    clip.status, clip.manually_approved = "approved", True
+
+
+@app.post("/api/queue/batch", dependencies=[Depends(require_auth)])
+def queue_batch(payload: QueueBatchInput):
+    """Queue picked clips in the order they were picked, after anything already queued for the account,
+    or with `now`, upload them straight away in that order."""
+    queued, skipped = [], []
+    with transaction() as db:
+        account = get_or_404(db, SocialAccount, payload.account_id)
+        state = db.get(SystemState, 1)
+        if payload.now:
+            if state.stop_all_posting or cfg.stop_all_posting:
+                raise Blocked("All posting is stopped; resume posting in Queue first")
+            capacity = todays_capacity(db, account, state)
+        for clip_id in dict.fromkeys(payload.clip_ids):
+            clip = db.get(Clip, clip_id)
+            if not clip:
+                skipped.append({"id": clip_id, "title": "", "reason": "Clip not found"})
+                continue
+            before = clip.status, clip.manually_approved
+            try:
+                active = db.scalar(
+                    select(ScheduledPost).where(
+                        ScheduledPost.clip_id == clip.id,
+                        ScheduledPost.account_id == account.id,
+                        ScheduledPost.status != "cancelled",
+                    )
+                )
+                if active:
+                    raise Blocked("Already queued or posted to this channel")
+                approve_for_queue(db, clip)
+                if payload.now:
+                    if capacity <= 0:
+                        raise Blocked("Today's posting limit for this channel is reached")
+                    post = post_now(db, clip, account, state)
+                    capacity -= 1
+                else:
+                    post = schedule_clip(
+                        db, clip.id, account.id, reactivate=True, after=queue_end(db, account.id)
+                    )
+                db.flush()
+            except Blocked as error:
+                clip.status, clip.manually_approved = before
+                skipped.append({"id": clip.id, "title": clip.title, "reason": str(error)})
+                continue
+            queued.append(
+                {"id": clip.id, "post_id": post.id, "scheduled_at": post.scheduled_at.isoformat() + "Z"}
+            )
+    return {"queued": queued, "skipped": skipped}
+
+
 @app.post("/api/queue/{post_id}/cancel", dependencies=[Depends(require_auth)])
-def cancel(post_id: str):
+def cancel(post_id: str, compact: bool = False):
     with transaction() as db:
         post = get_or_404(db, ScheduledPost, post_id)
         if post.status not in {"scheduled", "failed"}:
             raise Blocked("Only unsent posts can be cancelled")
+        slot = post.scheduled_at
         post.status = "cancelled"
-        db.flush()
+        free_slot(db, post)
         if not db.scalar(
             select(ScheduledPost).where(
                 ScheduledPost.clip_id == post.clip_id, ScheduledPost.status != "cancelled"
             )
         ):
             db.get(Clip, post.clip_id).status = "approved"
+        if compact:
+            compact_queue(db, post.account_id, slot)
         return {"cancelled": True}
 
 

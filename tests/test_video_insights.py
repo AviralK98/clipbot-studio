@@ -1,5 +1,7 @@
 """Per-video YouTube analysis for the AI insights page: endpoints and the plain-language notes."""
 
+from datetime import datetime
+
 import httpx
 import pytest
 import respx
@@ -235,7 +237,10 @@ def test_comparison_findings_point_at_feed_distribution_not_content():
     ]
     notes = video_insights.comparison_findings(videos)
     text = " ".join(notes)
-    assert "Only 1 of your 4 videos was shown in the Shorts feed (“Finally Guessing The Character!”)" in text
+    assert (
+        "Only 1 of your 4 videos is confirmed as shown in the Shorts feed (“Finally Guessing The Character!”)"
+        in text
+    )
     assert "96% of all your views" in text  # 1164 of 1217
     assert "Viewers didn't react better to it: 46% stayed past the opening, about the same as" in text
     assert "was the 2nd video you ever posted" in text
@@ -257,13 +262,58 @@ def test_compare_endpoint_splits_views_by_source(client, published):
     mock_youtube()
     body = client.get("/api/insights/compare").json()
     [video] = body["videos"]
-    assert (video["views"], video["feed_views"], video["search_views"], video["other_views"]) == (
-        1219,
-        1180,
-        3,
-        36,
-    )
-    assert video["feed_tested"] is True
+    # Views are YouTube's live count (as in Studio); the source split comes from Analytics.
+    assert (video["views"], video["analytics_views"]) == (1164, 1219)
+    assert (video["feed_views"], video["search_views"], video["other_views"]) == (1180, 3, 36)
+    assert video["feed_tested"] is True and video["sources_pending"] is False
     assert (video["upload_number"], video["posted_same_day"], video["posted_day"]) == (1, 1, "2026-09-18")
     assert body["start"] == "2026-09-17"
-    assert body["findings"][0].startswith("Only 1 of your 1 videos was shown in the Shorts feed")
+    assert body["findings"][0].startswith("Only 1 of your 1 videos is confirmed as shown in the Shorts feed")
+
+
+@respx.mock
+def test_new_upload_ranks_by_live_views_before_analytics_catch_up(client, published, monkeypatch):
+    # The day after upload: Analytics hasn't reported the video yet, but it already has views.
+    monkeypatch.setattr(video_insights, "now", lambda: datetime(2026, 9, 19, 12, 0))
+
+    def no_rows_yet(request):
+        dims = request.url.params.get("dimensions", "")
+        names = {
+            "video": ["video", "views"],
+            "insightTrafficSourceType": ["insightTrafficSourceType", "views"],
+        }
+        return httpx.Response(200, json={"columnHeaders": [{"name": n} for n in names.get(dims, ["views"])]})
+
+    mock_youtube(reports=no_rows_yet)
+    [video] = client.get("/api/insights/top?period=day").json()["videos"]
+    assert (video["video_id"], video["views"], video["live_count"]) == (VIDEO, 1164, True)
+    assert video["stayed_rate"] is None  # not reported yet
+
+    compared = client.get("/api/insights/compare").json()
+    assert compared["videos"][0]["sources_pending"] is True
+    assert compared["findings"][0].startswith(
+        "New views are coming in: “Finally Guessing The Character!” (1,164)"
+    )
+
+
+@respx.mock
+def test_expired_youtube_login_explains_how_to_renew(client, published):
+    respx.post("https://oauth2.googleapis.com/token").mock(
+        return_value=httpx.Response(
+            400, json={"error": "invalid_grant", "error_description": "Token has been expired or revoked."}
+        )
+    )
+    response = client.get("/api/insights/top?period=week")
+    assert response.status_code == 409
+    assert "renew-youtube-login.bat" in response.json()["detail"]
+    assert "Retrying hourly" not in response.json()["detail"]
+
+
+def test_pending_views_only_credit_the_feed_for_big_jumps():
+    small = compare_row(title="Slow burner", views=45, analytics_views=12, sources_pending=True)
+    notes = video_insights.comparison_findings([small])
+    assert notes[0] == (
+        "New views are coming in: “Slow burner” (45). YouTube hasn't reported where they came from yet (1-2 days)."
+    )
+    big = compare_row(title="Rocket", views=1070, analytics_views=0, sources_pending=True)
+    assert video_insights.comparison_findings([big])[0].endswith("most likely means the Shorts feed.")

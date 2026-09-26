@@ -57,6 +57,7 @@ export type Post = {
   clip_id: string;
   title: string;
   account: string;
+  account_id: string;
   platform: string;
   status: string;
   scheduled_at: string;
@@ -93,6 +94,7 @@ export type Studio = {
   sources: Source[];
   accounts: Account[];
   jobs: Job[];
+  recent_videos: RecentVideo[];
   projects: {
     id: string;
     provider: string;
@@ -134,6 +136,41 @@ export type Studio = {
     note: string;
   };
 };
+/** A recently added video and where it is in the clipping pipeline. */
+export type RecentVideo = {
+  id: string;
+  title: string;
+  url: string;
+  thumbnail: string;
+  duration: number;
+  added_at: string;
+  finished_at: string | null;
+  stage: "sending" | "clipping" | "scoring" | "done" | "failed";
+  problem: string | null;
+  engines: {
+    provider: string;
+    name: string;
+    project_id: string;
+    external_id: string | null;
+    status: string;
+    problem: string | null;
+    clips: number;
+    /** The owner confirmed OpusClip finished; its clips are being imported. */
+    confirmed: boolean;
+    /** OpusClip can't notify ClipBot here, so the owner confirms when it's finished. */
+    needs_confirmation: boolean;
+  }[];
+  /** Video files download after scoring; a clip can be posted once its file is saved. */
+  files: { saved: number; pending: number; problem: string | null };
+  clips: {
+    found: number;
+    scored: number;
+    scoring: number;
+    approved: number;
+    review: number;
+    rejected: number;
+  };
+};
 export type InsightVideo = {
   video_id: string;
   title: string;
@@ -168,6 +205,8 @@ export type TopVideos = {
     thumbnail: string;
     url: string;
     published_by_clipbot: boolean;
+    /** Views are YouTube's live count because Analytics hasn't reported this new video yet. */
+    live_count: boolean;
   })[];
 };
 export type VideoAnalysis = {
@@ -217,6 +256,9 @@ export type CompareVideo = {
   engine: string;
   duration: number;
   views: number;
+  analytics_views: number;
+  /** YouTube hasn't reported where this video's newest views came from yet. */
+  sources_pending: boolean;
   feed_views: number;
   search_views: number;
   other_views: number;
