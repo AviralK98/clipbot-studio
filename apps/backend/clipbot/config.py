@@ -1,13 +1,39 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+
+class StoredSettingsSource(PydanticBaseSettingsSource):
+    """Keys and settings saved from the app (see stored_settings.py)."""
+
+    def get_field_value(self, field, field_name):
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        from . import stored_settings
+
+        return stored_settings.load()
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):
+        # Environment variables first (servers, Docker), then what the owner saved in the app, then .env.
+        return (
+            init_settings,
+            env_settings,
+            StoredSettingsSource(settings_cls),
+            dotenv_settings,
+            file_secret_settings,
+        )
+
     app_env: str = "development"
     admin_password: str = "clipbot-local"
     session_secret: str = "local-development-secret-change-before-deployment"
@@ -17,6 +43,8 @@ class Settings(BaseSettings):
     autopilot: bool = True
     stop_all_posting: bool = False
     database_url: str = "sqlite:///./data/clipbot.db"
+    # The built dashboard (static files) to serve from the API itself; the desktop app sets this.
+    frontend_dir: Path | None = None
     redis_url: str = "redis://localhost:6379/0"
     storage_root: Path = Path("data/media")
     source_directory: Path = Path("data/sources")

@@ -136,6 +136,34 @@ export type Studio = {
     note: string;
   };
 };
+/** One setting on the keys screen. Secrets only say whether they're saved, never their value. */
+export type ConfigField = {
+  name: string;
+  label: string;
+  secret: boolean;
+  saved: boolean;
+  value: string | null;
+  from_environment: boolean;
+  choices?: string[];
+};
+export type AppConfig = {
+  /** False when keys come from environment variables (.env, Docker), so the app can't change them. */
+  editable: boolean;
+  groups: {
+    id: string;
+    title: string;
+    about: string;
+    link?: string;
+    fields: ConfigField[];
+  }[];
+  youtube: YouTubeConnection;
+};
+export type YouTubeConnection = {
+  connected: boolean;
+  status: "idle" | "waiting" | "connected" | "failed";
+  message: string;
+  url: string | null;
+};
 /** A recently added video and where it is in the clipping pipeline. */
 export type RecentVideo = {
   id: string;

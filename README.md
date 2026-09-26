@@ -2,6 +2,13 @@
 
 An autonomous studio for authorized long-form content: dual clipping engines, structured AI review, deduplication, scheduling, publishing and measured feedback. Python 3.12 / FastAPI / SQLAlchemy + Next.js / TypeScript. ClipBot is an independent repository containing its own backend, frontend, workers and deployment configuration.
 
+## Windows app (recommended for personal use)
+
+Install `ClipBot-Setup.exe`, create a password, paste your keys on the Connections page and click
+Connect YouTube. One program runs everything from the taskbar tray; keys are kept in Windows
+Credential Manager, not in a file. See [docs/DESKTOP.md](docs/DESKTOP.md) for setup, including the
+YouTube Google Cloud steps, and for building the app from source.
+
 ## Start with Docker
 
 1. Clone this repository and enter its root directory.

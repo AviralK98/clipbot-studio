@@ -5,6 +5,7 @@ import logging
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -14,6 +15,7 @@ from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 from .analytics import analytics_report, normalize
+from .app_setup import router as setup_router
 from .clip_watch import current_analysis, request_analysis
 from .config import get_settings
 from .db import Session, initialize, transaction
@@ -52,7 +54,7 @@ from .schemas import (
     SourceInput,
     VideoInput,
 )
-from .security import require_auth, signer, verify_password
+from .security import origin_allowed, require_auth, start_session, verify_password
 from .storage import LocalStorage
 from .video_insights import (
     compare_videos,
@@ -74,6 +76,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="ClipBot API", version="0.1.0", lifespan=lifespan)
+app.include_router(setup_router)
 
 
 @app.middleware("http")
@@ -82,7 +85,10 @@ async def request_context(request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    # The dashboard's hashed build files may be cached; everything else is always fresh.
+    response.headers.setdefault("Cache-Control", "no-store")
     log.info(
         json.dumps(
             {
@@ -154,7 +160,7 @@ login_attempts = defaultdict(list)
 
 @app.post("/api/auth/login")
 def login(payload: Login, request: Request, response: Response):
-    if request.headers.get("origin") != cfg.web_origin:
+    if not origin_allowed(request.headers.get("origin")):
         raise HTTPException(403, "Invalid request origin")
     address = request.client.host if request.client else "local"
     history = [t for t in login_attempts[address] if time.time() - t < 300]
@@ -166,17 +172,7 @@ def login(payload: Login, request: Request, response: Response):
         if not user or not verify_password(payload.password, user.password_hash):
             raise HTTPException(401, "Incorrect studio password")
     login_attempts.pop(address, None)
-    response.set_cookie(
-        "clipbot_session",
-        signer().dumps(
-            {"sub": "owner", "credential": hashlib.sha256(user.password_hash.encode()).hexdigest()}
-        ),
-        httponly=True,
-        secure=cfg.app_env == "production",
-        samesite="lax",
-        max_age=43200,
-        path="/",
-    )
+    start_session(response, user.password_hash)
     return {"user": "Studio owner", "demo_mode": cfg.demo_mode}
 
 
@@ -895,3 +891,24 @@ def seed_demo():
 
     with transaction() as db:
         return seed(db)
+
+
+# The built dashboard, served from the API itself (the desktop app sets FRONTEND_DIR). Registered
+# last so every API route above takes precedence over this catch-all.
+@app.get("/{path:path}", include_in_schema=False)
+def dashboard(path: str):
+    if not cfg.frontend_dir or path == "api" or path.startswith("api/"):
+        raise HTTPException(404, "Not found")
+    root = Path(cfg.frontend_dir).resolve()
+    # Pages are exported as "clips.html" etc.; "/" is index.html.
+    names = [path, f"{path}.html", f"{path}/index.html"] if path else ["index.html"]
+    for name in names:
+        file = (root / name).resolve()
+        if file.is_relative_to(root) and file.is_file():
+            # Build files have content hashes in their names, so browsers may keep them.
+            immutable = name.startswith("_next/static/")
+            headers = {"Cache-Control": "public, max-age=31536000, immutable"} if immutable else None
+            return FileResponse(file, headers=headers)
+    if (root / "404.html").is_file():
+        return FileResponse(root / "404.html", status_code=404)
+    raise HTTPException(404, "Not found")

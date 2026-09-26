@@ -92,8 +92,8 @@ class YouTubeProvider(PublishingProvider):
             # Wait rather than fail, so uploads and view checks resume once it is renewed.
             raise Deferred(
                 3600,
-                "YouTube login expired or was revoked: double-click renew-youtube-login.bat, then restart "
-                "ClipBot. Retrying hourly.",
+                "YouTube login expired or was revoked: reconnect it in ClipBot (Connections, then "
+                "Connect YouTube). Retrying hourly.",
             )
         detail = f": {reason}" if reason else ""
         raise Blocked(

@@ -27,6 +27,33 @@ def signer():
     return URLSafeTimedSerializer(get_settings().session_secret, salt="clipbot-session")
 
 
+def start_session(response, password_hash: str) -> None:
+    """Sign the owner in. Changing the password changes the fingerprint and ends older sessions."""
+    response.set_cookie(
+        "clipbot_session",
+        signer().dumps({"sub": "owner", "credential": hashlib.sha256(password_hash.encode()).hexdigest()}),
+        httponly=True,
+        secure=get_settings().app_env == "production",
+        samesite="lax",
+        max_age=43200,
+        path="/",
+    )
+
+
+def origin_allowed(origin: str | None) -> bool:
+    """The dashboard's own origin. On this computer, localhost and 127.0.0.1 are the same place."""
+    expected = get_settings().web_origin
+    if origin == expected:
+        return True
+    ours, theirs = urlparse(expected), urlparse(origin or "")
+    loopback = {"localhost", "127.0.0.1"}
+    return (
+        ours.hostname in loopback
+        and theirs.hostname in loopback
+        and (ours.scheme, ours.port) == (theirs.scheme, theirs.port)
+    )
+
+
 def require_auth(request: Request):
     cfg = get_settings()
     token = request.headers.get("x-api-key", "")
@@ -48,10 +75,8 @@ def require_auth(request: Request):
             raise BadSignature("Invalid user or rotated credential")
     except (BadSignature, SignatureExpired):
         raise HTTPException(401, "Sign in to your studio") from None
-    if request.method not in {"GET", "HEAD", "OPTIONS"}:
-        origin = request.headers.get("origin")
-        if origin != cfg.web_origin:
-            raise HTTPException(403, "Invalid request origin")
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and not origin_allowed(request.headers.get("origin")):
+        raise HTTPException(403, "Invalid request origin")
     return owner
 
 

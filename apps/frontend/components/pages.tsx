@@ -30,6 +30,7 @@ import {
 import { api, date, number, Post, Source, Studio } from "@/lib/types";
 import { Badge, Empty, ReachChart, Toggle } from "./ui";
 import { VideoInsights } from "./video-insights";
+import { KeysPanel } from "./app-settings";
 export type Perform = (
   action: () => Promise<unknown>,
   message: string,
@@ -641,14 +642,23 @@ export function ConnectionsPage({
   onAccount,
   onSetup,
   perform,
+  busy,
 }: {
   studio: Studio;
   onAccount: () => void;
   onSetup: () => void;
   perform: Perform;
+  busy: boolean;
 }) {
   return (
     <>
+      <KeysPanel perform={perform} busy={busy} />
+      <div className="section-heading section-spaced">
+        <div>
+          <h2>Status</h2>
+          <p>What&apos;s set up, service by service.</p>
+        </div>
+      </div>
       <div className="connection-grid">
         {studio.integrations.map((i) => (
           <article className="panel connection-card" key={i.id}>
@@ -695,7 +705,10 @@ export function ConnectionsPage({
       <div className="section-heading section-spaced">
         <div>
           <h2>Publishing destinations</h2>
-          <p>Register a channel after configuring its credentials in .env.</p>
+          <p>
+            Connecting YouTube adds your channel here. Add TikTok with your
+            OpusClip social account ID.
+          </p>
         </div>
         <button className="button" onClick={onAccount}>
           <Plus size={16} />
@@ -742,9 +755,8 @@ export function ConnectionsPage({
       <div className="info-note">
         <ShieldCheck size={17} />
         <span>
-          Configured means environment variables are present. Live API access,
-          app review and granted scopes must still be verified with your own
-          account.
+          Configured means the keys are saved. Whether each service accepts
+          them shows up the first time ClipBot uses them.
         </span>
       </div>
     </>

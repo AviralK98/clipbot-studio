@@ -105,7 +105,7 @@ def recover_leases():
             job.lease_until = None
 
 
-async def drain(limit=100):
+async def drain(limit=100, stopping=lambda: False):
     """Local development worker, sharing the exact production handlers."""
     count = 0
     for _ in range(limit):
@@ -113,6 +113,8 @@ async def drain(limit=100):
         if not jobs:
             break
         for job_id in jobs:
+            if stopping():  # the app is quitting; unstarted jobs stay queued
+                return count
             await execute(job_id)
             count += 1
     return count

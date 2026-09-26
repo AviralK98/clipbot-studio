@@ -14,3 +14,6 @@ data/
 artifacts/
 *.tsbuildinfo
 .claude/
+build/
+dist/
+apps/frontend/out/

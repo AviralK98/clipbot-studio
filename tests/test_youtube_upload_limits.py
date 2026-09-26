@@ -104,7 +104,7 @@ async def test_expired_login_waits_instead_of_failing(monkeypatch):
     init = respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200))
     post = SimpleNamespace(remote_state={})
 
-    with pytest.raises(Deferred, match="renew-youtube-login.bat") as caught:
+    with pytest.raises(Deferred, match="Connect YouTube") as caught:
         await YouTubeProvider().publish(clip_on_disk("expired"), post, lambda state: None)
     assert caught.value.seconds == 3600
     assert init.call_count == 0 and post.remote_state == {}  # nothing started, so a retry is safe

@@ -1,8 +1,9 @@
-"""Renew ClipBot's YouTube login and save the new refresh token into .env.
+"""Connect or renew ClipBot's YouTube login.
 
-While the Google OAuth app is in "Testing", Google expires refresh tokens after 7 days.
-Run `python -m clipbot.youtube_login` (or double-click renew-youtube-login.bat) from the project
-folder: your browser opens Google's sign-in, you approve, and the new token is written to .env.
+While the Google OAuth app is in "Testing", Google expires refresh tokens after 7 days. In the app,
+Connections > Connect YouTube runs start_connect(). For .env-based development, run
+`python -m clipbot.youtube_login` (or double-click renew-youtube-login.bat) from the project folder:
+your browser opens Google's sign-in, you approve, and the new token is written to .env.
 The token is never printed.
 
 One-time setup for a "Web application" OAuth client: add REDIRECT_URI below to the client's
@@ -187,6 +188,54 @@ def check_refresh_token(client_id: str, client_secret: str, refresh_token: str) 
         raise LoginError("The new login didn't work when tested; run it again")
 
 
+def finish_login(reply: dict, state: str, client_id: str, client_secret: str, verifier: str) -> dict:
+    """Check Google's redirect and trade it for tokens that are known to work."""
+    if reply.get("state") != state:
+        raise LoginError("The sign-in reply didn't match this request; try again")
+    if "error" in reply:
+        raise LoginError(f"Google sign-in was cancelled or refused ({reply['error']})")
+    tokens = exchange_code(client_id, client_secret, reply.get("code", ""), verifier)
+    check_refresh_token(client_id, client_secret, tokens["refresh_token"])
+    return tokens
+
+
+# One "Connect YouTube" attempt from the app at a time; the dashboard polls connect_status().
+_connection = {"status": "idle", "message": "", "url": None}
+_connection_lock = threading.Lock()
+
+
+def start_connect(client_id: str, client_secret: str, on_connected) -> str:
+    """Start Google's sign-in and wait for it in the background; returns the URL to open.
+
+    on_connected(tokens) saves the login and returns a message for the dashboard."""
+    with _connection_lock:
+        if _connection["status"] == "waiting":
+            return _connection["url"]
+        verifier, challenge = pkce_pair()
+        state = secrets.token_urlsafe(24)
+        url = consent_url(client_id, state, challenge)
+        _connection.update(
+            status="waiting", message="Approve ClipBot in the Google tab that opened.", url=url
+        )
+
+    def wait():
+        try:
+            tokens = finish_login(wait_for_redirect(), state, client_id, client_secret, verifier)
+            message = on_connected(tokens)
+            _connection.update(status="connected", message=message, url=None)
+        except LoginError as exc:
+            _connection.update(status="failed", message=str(exc), url=None)
+        except Exception as exc:  # keep the app running; report it on the Connections page
+            _connection.update(status="failed", message=f"Connecting failed: {exc}", url=None)
+
+    threading.Thread(target=wait, name="youtube-connect", daemon=True).start()
+    return url
+
+
+def connect_status() -> dict:
+    return dict(_connection)
+
+
 def main(env_path: Path = Path(".env"), open_browser=webbrowser.open) -> int:
     if not env_path.is_file():
         print(f"Can't find {env_path.resolve()}; run this from the clipbot-studio folder.")
@@ -204,13 +253,7 @@ def main(env_path: Path = Path(".env"), open_browser=webbrowser.open) -> int:
     print(f"\nIf no browser opens, paste this into one:\n{url}\n")
     open_browser(url)
     try:
-        reply = wait_for_redirect()
-        if reply.get("state") != state:
-            raise LoginError("The sign-in reply didn't match this request; run it again")
-        if "error" in reply:
-            raise LoginError(f"Google sign-in was cancelled or refused ({reply['error']})")
-        tokens = exchange_code(client_id, client_secret, reply.get("code", ""), verifier)
-        check_refresh_token(client_id, client_secret, tokens["refresh_token"])
+        tokens = finish_login(wait_for_redirect(), state, client_id, client_secret, verifier)
     except LoginError as exc:
         print(f"\nNot renewed: {exc}")
         return 1

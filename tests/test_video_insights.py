@@ -305,7 +305,7 @@ def test_expired_youtube_login_explains_how_to_renew(client, published):
     )
     response = client.get("/api/insights/top?period=week")
     assert response.status_code == 409
-    assert "renew-youtube-login.bat" in response.json()["detail"]
+    assert "Connect YouTube" in response.json()["detail"]
     assert "Retrying hourly" not in response.json()["detail"]
 
 

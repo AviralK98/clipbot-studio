@@ -12,9 +12,13 @@ class Base(DeclarativeBase):
 
 cfg = get_settings()
 if cfg.database_url.startswith("sqlite"):
-    from pathlib import Path
+    from sqlalchemy.engine import make_url
 
-    Path("data").mkdir(exist_ok=True)
+    database = make_url(cfg.database_url).database
+    if database and database != ":memory:":
+        from pathlib import Path
+
+        Path(database).parent.mkdir(parents=True, exist_ok=True)
 engine = create_engine(
     cfg.database_url,
     pool_pre_ping=True,
@@ -68,6 +72,10 @@ def initialize():
                     min_interval=cfg.min_post_interval_minutes,
                 )
             )
+        # A configured ADMIN_PASSWORD is the password. Without one (the desktop app), the owner
+        # creates it on the first-run screen and it's never overwritten here.
+        if "admin_password" not in cfg.model_fields_set:
+            return
         if not db.get(User, "owner"):
             db.add(User(id="owner", name="Studio owner", password_hash=hash_password(cfg.admin_password)))
         elif not verify_password(cfg.admin_password, db.get(User, "owner").password_hash):

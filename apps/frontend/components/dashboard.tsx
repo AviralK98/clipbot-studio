@@ -53,6 +53,7 @@ import { Badge, ClipCard, Empty, Modal, ReachChart, Stat, Toggle } from "./ui";
 import { PlatformCopy } from "./platform-copy";
 import { StudioDialogs } from "./dialogs";
 import { VideoProgress } from "./video-progress";
+import { SetupBanner } from "./app-settings";
 import {
   canPick,
   defaultQueueAccount,
@@ -132,6 +133,10 @@ export default function Dashboard({ view }: { view: string }) {
     [posts, setPosts] = useState<Post[]>([]);
   const [auth, setAuth] = useState<boolean | null>(null),
     [password, setPassword] = useState(""),
+    // First run of the desktop app: no password exists yet, so the owner creates one.
+    [firstRun, setFirstRun] = useState(false),
+    [desktopApp, setDesktopApp] = useState(false),
+    [confirmPassword, setConfirmPassword] = useState(""),
     [error, setError] = useState(""),
     [toast, setToast] = useState(""),
     [busy, setBusy] = useState(false);
@@ -193,6 +198,15 @@ export default function Dashboard({ view }: { view: string }) {
     const id = setTimeout(() => setToast(""), 6000);
     return () => clearTimeout(id);
   }, [toast]);
+  useEffect(() => {
+    if (auth !== false) return;
+    api<{ needs_password: boolean; app_settings: boolean }>("/setup/status")
+      .then((s) => {
+        setFirstRun(s.needs_password);
+        setDesktopApp(s.app_settings);
+      })
+      .catch(() => setFirstRun(false));
+  }, [auth]);
   const perform = async (action: () => Promise<unknown>, message: string) => {
     setBusy(true);
     setError("");
@@ -249,29 +263,56 @@ export default function Dashboard({ view }: { view: string }) {
           className="login-form"
           onSubmit={async (e) => {
             e.preventDefault();
-            await perform(
-              () => api("/auth/login", { password }),
-              "Welcome to your studio",
+            if (firstRun && password !== confirmPassword) {
+              setError("The two passwords don't match.");
+              return;
+            }
+            const done = await perform(
+              () =>
+                api(firstRun ? "/setup/password" : "/auth/login", { password }),
+              firstRun
+                ? "Your studio is ready. Next, add your keys in Connections."
+                : "Welcome to your studio",
             );
+            if (done && firstRun) window.location.href = "/connections";
           }}
         >
           <div className="login-icon">
             <WandSparkles size={28} />
           </div>
-          <h2>Welcome to your studio.</h2>
-          <p>Sign in to keep your content moving.</p>
+          <h2>{firstRun ? "Welcome to ClipBot." : "Welcome to your studio."}</h2>
+          <p>
+            {firstRun
+              ? "Create a password for your studio. You'll use it to open the dashboard."
+              : "Sign in to keep your content moving."}
+          </p>
           <label>
-            Studio password
+            {firstRun ? "New studio password" : "Studio password"}
             <input
               autoFocus
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              autoComplete="current-password"
-              placeholder="Enter your password"
+              minLength={firstRun ? 8 : undefined}
+              autoComplete={firstRun ? "new-password" : "current-password"}
+              placeholder={
+                firstRun ? "At least 8 characters" : "Enter your password"
+              }
             />
           </label>
+          {firstRun && (
+            <label>
+              Type it again
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+                autoComplete="new-password"
+              />
+            </label>
+          )}
           {error && (
             <div className="inline-error" role="alert">
               {error}
@@ -282,12 +323,15 @@ export default function Dashboard({ view }: { view: string }) {
               <Loader2 className="spin" size={18} />
             ) : (
               <>
-                Open studio <ArrowRight size={17} />
+                {firstRun ? "Create password" : "Open studio"}{" "}
+                <ArrowRight size={17} />
               </>
             )}
           </button>
           <small>
-            Use the ADMIN_PASSWORD configured in your local .env file.
+            {desktopApp
+              ? "Forgot it? Right-click the ClipBot icon in the taskbar tray and choose Reset studio password."
+              : "Use the ADMIN_PASSWORD configured in your .env file."}
           </small>
         </form>
       </main>
@@ -543,6 +587,7 @@ export default function Dashboard({ view }: { view: string }) {
           />
           {view === "overview" && (
             <>
+              <SetupBanner studio={studio} />
               <div className="stats-grid">
                 <Stat
                   label="Source videos"
@@ -967,6 +1012,7 @@ export default function Dashboard({ view }: { view: string }) {
               onAccount={() => setDialog({ type: "account" })}
               onSetup={() => setDialog({ type: "setup" })}
               perform={perform}
+              busy={busy}
             />
           )}
           {view === "settings" && (
