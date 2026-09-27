@@ -15,6 +15,7 @@ import os
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -56,7 +57,9 @@ def frontend_dir() -> Path:
 
 def load_config() -> dict:
     try:
-        return json.loads((config_dir() / "config.json").read_text(encoding="utf-8"))
+        return json.loads(
+            (config_dir() / "config.json").read_text(encoding="utf-8-sig")
+        )  # tolerate Notepad/PowerShell edits
     except FileNotFoundError:
         return {}
 
@@ -196,7 +199,52 @@ class ClipBot:
             thread.join(timeout=30)  # a long upload keeps going at most this long; its job resumes next time
 
     def open(self) -> None:
-        webbrowser.open(self.url)
+        open_dashboard(self.url)
+
+
+# Browsers the dashboard can open in, besides Windows' default for web links.
+BROWSERS = {
+    "chrome": ("Google Chrome", "chrome.exe"),
+    "edge": ("Microsoft Edge", "msedge.exe"),
+    "firefox": ("Firefox", "firefox.exe"),
+    "brave": ("Brave", "brave.exe"),
+}
+
+
+def installed_browsers() -> dict[str, str]:
+    """{key: path to the browser}, from where installers register themselves in Windows."""
+    import winreg
+
+    found = {}
+    for key, (_, exe) in BROWSERS.items():
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                path = winreg.QueryValue(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}")
+            except OSError:
+                continue
+            path = path.strip('"')
+            if Path(path).is_file():
+                found[key] = path
+                break
+    return found
+
+
+def open_dashboard(url: str) -> None:
+    """In the browser picked from the tray menu, or else Windows' default browser."""
+    path = installed_browsers().get(load_config().get("browser", ""))
+    if path:
+        subprocess.Popen([path, url])
+    else:
+        webbrowser.open(url)
+
+
+def set_browser(key: str) -> None:
+    config = load_config()
+    if key:
+        config["browser"] = key
+    else:
+        config.pop("browser", None)
+    save_config(config)
 
 
 def posting_paused() -> bool:
@@ -272,8 +320,23 @@ def run_tray(clipbot: ClipBot, clips: Path) -> None:
     def quit_app(icon, item):
         icon.stop()
 
+    def browser_choice(key, label):
+        def choose(icon, item):
+            set_browser(key)
+            clipbot.open()
+
+        return pystray.MenuItem(
+            label, choose, checked=lambda item: load_config().get("browser", "") == key, radio=True
+        )
+
+    installed = installed_browsers()
+    browsers = [browser_choice("", "Windows default browser")] + [
+        browser_choice(key, name) for key, (name, _) in BROWSERS.items() if key in installed
+    ]
+
     menu = pystray.Menu(
         pystray.MenuItem("Open ClipBot", lambda icon, item: clipbot.open(), default=True),
+        pystray.MenuItem("Open dashboard in", pystray.Menu(*browsers)),
         pystray.MenuItem("Pause posting", toggle_pause, checked=lambda item: posting_paused()),
         pystray.MenuItem(
             "Start with Windows", toggle_startup, checked=lambda item: starts_with_windows(), visible=frozen()
@@ -314,7 +377,7 @@ def main(argv=None) -> int:
     port = int(config.get("port", DEFAULT_PORT))
     if clipbot_running(port):  # already open: just show it
         if not args.background:
-            webbrowser.open(f"http://127.0.0.1:{port}/")
+            open_dashboard(f"http://127.0.0.1:{port}/")
         return 0
     if not port_free(port):
         message(

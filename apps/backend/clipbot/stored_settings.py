@@ -70,7 +70,7 @@ def _keyring():
 
 def _read_plain() -> dict[str, str]:
     try:
-        values = json.loads(settings_file().read_text(encoding="utf-8"))
+        values = json.loads(settings_file().read_text(encoding="utf-8-sig"))  # tolerate hand edits
     except FileNotFoundError:
         return {}
     return {

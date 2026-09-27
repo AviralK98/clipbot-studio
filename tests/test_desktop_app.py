@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import threading
 import time
 import urllib.parse
@@ -277,3 +278,39 @@ def test_an_env_setup_moves_into_the_app(vault, tmp_path):
     loaded = Settings(_env_file=None)
     assert (loaded.opus_api_key, loaded.max_clips_per_day) == ("opus-secret", 12)
     assert loaded.database_url != "sqlite:///elsewhere.db"  # this computer's paths stay the app's
+
+
+def test_the_dashboard_opens_in_the_browser_picked_from_the_tray(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLIPBOT_CONFIG_DIR", str(tmp_path))
+    launched, default = [], []
+    monkeypatch.setattr(desktop, "installed_browsers", lambda: {"chrome": "C:/Chrome/chrome.exe"})
+    monkeypatch.setattr(desktop.subprocess, "Popen", launched.append)
+    monkeypatch.setattr(desktop.webbrowser, "open", default.append)
+    url = "http://127.0.0.1:8742/"
+
+    desktop.open_dashboard(url)  # nothing picked: Windows' default browser
+    desktop.set_browser("chrome")
+    desktop.open_dashboard(url)
+    assert (default, launched) == ([url], [["C:/Chrome/chrome.exe", url]])
+
+    desktop.set_browser("brave")  # picked, but not installed any more: back to the default
+    desktop.open_dashboard(url)
+    assert len(default) == 2
+    desktop.set_browser("")
+    assert "browser" not in desktop.load_config()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="reads the Windows registry")
+def test_installed_browsers_are_real_files():
+    from pathlib import Path
+
+    assert all(Path(path).is_file() for path in desktop.installed_browsers().values())
+
+
+def test_hand_edited_settings_files_still_load(tmp_path, monkeypatch, vault):
+    # Notepad and PowerShell 5 can save UTF-8 with a byte-order mark.
+    monkeypatch.setenv("CLIPBOT_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"port": 9000}', encoding="utf-8-sig")
+    (tmp_path / "settings.json").write_text('{"youtube_privacy": "public"}', encoding="utf-8-sig")
+    assert desktop.load_config() == {"port": 9000}
+    assert stored_settings.load()["youtube_privacy"] == "public"
